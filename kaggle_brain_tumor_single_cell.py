@@ -151,11 +151,16 @@ def find_source_brats19_dir():
     ]
     for c in candidates:
         if os.path.exists(c):
-            # Look for HGG / LGG inside
-            for root, dirs, _ in os.walk(c):
-                if "HGG" in dirs or any(d.startswith("BraTS19") for d in dirs):
+            for root, dirs, files in os.walk(c):
+                if "HGG" in dirs or "LGG" in dirs or any("brats19" in d.lower() for d in dirs) or any("flair" in f.lower() for f in files):
                     print(f"[OK] Found BraTS 2019 Source root: {root}")
                     return root
+
+    if os.path.exists("/kaggle/input"):
+        for root, dirs, files in os.walk("/kaggle/input"):
+            if "HGG" in dirs or "LGG" in dirs or any("brats19" in d.lower() for d in dirs) or any("flair" in f.lower() for f in files):
+                print(f"[OK] Found BraTS 2019 Source root: {root}")
+                return root
     return None
 
 
@@ -217,11 +222,11 @@ class BraTS19SourceDataset(Dataset):
 
         if root_dir and os.path.exists(root_dir):
             print(f"[INDEXING] Scanning BraTS 2019 volumes from: {root_dir}...")
-            pat_dirs = []
-            for root, dirs, _ in os.walk(root_dir):
-                for d in dirs:
-                    if d.startswith("BraTS19"):
-                        pat_dirs.append(os.path.join(root, d))
+            pat_dirs = set()
+            for root, dirs, files in os.walk(root_dir):
+                if any("flair" in f.lower() and f.endswith((".nii", ".nii.gz")) for f in files):
+                    pat_dirs.add(root)
+            pat_dirs = sorted(list(pat_dirs))
 
             print(f"  -> Found {len(pat_dirs)} BraTS 2019 patient volumes.")
             random.Random(CFG.SEED).shuffle(pat_dirs)
@@ -614,7 +619,8 @@ def collect_phase0_stats(model, backbone=CFG.ENCODER):
         def hook_fn(module, inp, out):
             x = inp[0].detach()  # [B, C, H, W]
             B, C, H, W = x.shape
-            mask = current_mask[0].float()
+            device = x.device
+            mask = current_mask[0].float().to(device)
             m = F.adaptive_avg_pool2d(mask, (H, W)).expand(B, -1, -1, -1)  # [B, K, H, W]
             for k in range(K):
                 mk = m[:, k:k+1]
@@ -634,10 +640,10 @@ def collect_phase0_stats(model, backbone=CFG.ENCODER):
     with torch.no_grad():
         for imgs, masks in loader:
             imgs = imgs.to(CFG.DEVICE)
-            # One-hot mask for hooks
-            mask_oh = F.one_hot(masks, num_classes=K).permute(0, 3, 1, 2)
+            # One-hot mask for hooks on same device
+            mask_oh = F.one_hot(masks.to(CFG.DEVICE), num_classes=K).permute(0, 3, 1, 2)
             current_mask[0] = mask_oh
-            total_class_pixels += mask_oh.sum([0, 2, 3])
+            total_class_pixels += mask_oh.sum([0, 2, 3]).cpu()
             _ = model(imgs)
 
     for h in handles:
@@ -878,10 +884,81 @@ def evaluate_source_only(model, loader):
     return np.mean(scores, axis=0), np.std([s[3] for s in scores]), scores
 
 
+# ==============================================================================
+# BASELINE MODULES: AdaBN & alpha-BN (Exact Layerwise Implementations)
+# ==============================================================================
+
+class AdaBatchNorm2d(nn.Module):
+    def __init__(self, bn):
+        super().__init__()
+        self.bn = bn
+
+    def forward(self, x):
+        tgt_mu = x.mean([0, 2, 3])
+        tgt_va = x.var ([0, 2, 3], unbiased=False).clamp(min=1e-5)
+        denom  = torch.sqrt(tgt_va + self.bn.eps).unsqueeze(0).unsqueeze(2).unsqueeze(3)
+        mean   = tgt_mu.unsqueeze(0).unsqueeze(2).unsqueeze(3)
+        x_norm = (x - mean) / denom
+        if self.bn.affine:
+            w = self.bn.weight.unsqueeze(0).unsqueeze(2).unsqueeze(3)
+            b = self.bn.bias.unsqueeze(0).unsqueeze(2).unsqueeze(3)
+            return x_norm * w + b
+        return x_norm
+
+
+class AlphaBatchNorm2d(nn.Module):
+    def __init__(self, bn, alpha=0.5):
+        super().__init__()
+        self.bn = bn
+        self.alpha = alpha
+
+    def forward(self, x):
+        tgt_mu = x.mean([0, 2, 3])
+        tgt_va = x.var ([0, 2, 3], unbiased=False).clamp(min=1e-5)
+        src_mu = self.bn.running_mean.to(x.device)
+        src_va = self.bn.running_var.to(x.device)
+        m = (1.0 - self.alpha) * src_mu + self.alpha * tgt_mu
+        v = (1.0 - self.alpha) * src_va + self.alpha * tgt_va
+        denom  = torch.sqrt(v + self.bn.eps).unsqueeze(0).unsqueeze(2).unsqueeze(3)
+        mean   = m.unsqueeze(0).unsqueeze(2).unsqueeze(3)
+        x_norm = (x - mean) / denom
+        if self.bn.affine:
+            w = self.bn.weight.unsqueeze(0).unsqueeze(2).unsqueeze(3)
+            b = self.bn.bias.unsqueeze(0).unsqueeze(2).unsqueeze(3)
+            return x_norm * w + b
+        return x_norm
+
+
+def convert_model_to_adabn(model):
+    m = copy.deepcopy(model)
+    for name, module in list(m.named_modules()):
+        if isinstance(module, nn.BatchNorm2d):
+            layer = AdaBatchNorm2d(module).to(module.weight.device if module.weight is not None else CFG.DEVICE)
+            parts = name.split(".")
+            parent = m
+            for p in parts[:-1]:
+                parent = getattr(parent, p)
+            setattr(parent, parts[-1], layer)
+    return m.to(CFG.DEVICE)
+
+
+def convert_model_to_alpha_bn(model, alpha=0.5):
+    m = copy.deepcopy(model)
+    for name, module in list(m.named_modules()):
+        if isinstance(module, nn.BatchNorm2d):
+            layer = AlphaBatchNorm2d(module, alpha=alpha).to(module.weight.device if module.weight is not None else CFG.DEVICE)
+            parts = name.split(".")
+            parent = m
+            for p in parts[:-1]:
+                parent = getattr(parent, p)
+            setattr(parent, parts[-1], layer)
+    return m.to(CFG.DEVICE)
+
+
 def evaluate_adabn(model, loader):
     """AdaBN: re-estimates batch mean and variance on single target image (B=1)."""
-    model_adabn = copy.deepcopy(model)
-    model_adabn.train()  # Enables single-image forward pass BN statistics
+    model_adabn = convert_model_to_adabn(model)
+    model_adabn.eval()
     scores = []
     with torch.no_grad():
         for img, mask in loader:
@@ -894,32 +971,15 @@ def evaluate_adabn(model, loader):
 
 def evaluate_alpha_bn(model, loader, alpha=0.5):
     """alpha-BN: static interpolation between source running stats and single-image stats."""
-    model_alpha = copy.deepcopy(model)
+    model_alpha = convert_model_to_alpha_bn(model, alpha=alpha)
     model_alpha.eval()
     scores = []
     with torch.no_grad():
         for img, mask in loader:
             img = img.to(CFG.DEVICE)
-            orig_means, orig_vars = {}, {}
-            for name, m in model_alpha.named_modules():
-                if isinstance(m, nn.BatchNorm2d):
-                    orig_means[name] = m.running_mean.clone()
-                    orig_vars[name]  = m.running_var.clone()
-                    s_mean = img.mean([0, 2, 3]).expand_as(m.running_mean) if img.shape[1] == m.num_features else m.running_mean
-                    s_var  = img.var ([0, 2, 3], unbiased=False).expand_as(m.running_var) if img.shape[1] == m.num_features else m.running_var
-                    m.running_mean.copy_((1.0 - alpha) * m.running_mean + alpha * s_mean)
-                    m.running_var.copy_ ((1.0 - alpha) * m.running_var  + alpha * s_var)
-
             logits = model_alpha(img)
             pred = torch.argmax(logits, dim=1).cpu().numpy()[0]
             scores.append(compute_brats_dice(pred, mask.numpy()[0]))
-
-            # Restore original stats
-            for name, m in model_alpha.named_modules():
-                if isinstance(m, nn.BatchNorm2d):
-                    m.running_mean.copy_(orig_means[name])
-                    m.running_var.copy_(orig_vars[name])
-
     return np.mean(scores, axis=0), np.std([s[3] for s in scores]), scores
 
 
