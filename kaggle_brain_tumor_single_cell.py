@@ -142,25 +142,47 @@ print(f"[OK] Initialized PMSA-BN Brain Engine on {CFG.DEVICE} | Backbone: {CFG.E
 
 def find_source_brats19_dir():
     """Locates Walid Rehamnia's BraTS 2019 Training directory on Kaggle."""
+    if not os.path.exists("/kaggle/input"):
+        for c in ["./brats2019_source", "../brats2019_source"]:
+            if os.path.exists(c):
+                return c
+        return None
+
+    top_items = os.listdir("/kaggle/input")
+    print(f"[DISCOVERY] Checking mounted datasets in /kaggle/input:")
+    for item in top_items:
+        print(f"  -> /kaggle/input/{item}")
+
     candidates = [
         "/kaggle/input/datasets/walidrehamnia/brain-tumor-segmentation-brats-2019-train-valid",
         "/kaggle/input/brain-tumor-segmentation-brats-2019-train-valid",
         "/kaggle/input/brain-tumor-segmentation-brats-2019",
         "/kaggle/input/datasets/mateuszbuda/brain-tumor-segmentation-brats-2019",
-        "./brats2019_source"
+        "/kaggle/input/miccai-brats-2019-data-training"
     ]
     for c in candidates:
         if os.path.exists(c):
             for root, dirs, files in os.walk(c):
-                if "HGG" in dirs or "LGG" in dirs or any("brats19" in d.lower() for d in dirs) or any("flair" in f.lower() for f in files):
+                if any("flair" in f.lower() and f.endswith((".nii", ".nii.gz")) for f in files):
                     print(f"[OK] Found BraTS 2019 Source root: {root}")
                     return root
+                if any(d.upper() in ["HGG", "LGG"] for d in dirs):
+                    print(f"[OK] Found BraTS 2019 Source root with HGG/LGG: {root}")
+                    return root
 
-    if os.path.exists("/kaggle/input"):
-        for root, dirs, files in os.walk("/kaggle/input"):
-            if "HGG" in dirs or "LGG" in dirs or any("brats19" in d.lower() for d in dirs) or any("flair" in f.lower() for f in files):
-                print(f"[OK] Found BraTS 2019 Source root: {root}")
-                return root
+    # Search in all mounted directories except 2020 target datasets
+    for item in top_items:
+        if "2020" in item.lower() and "2019" not in item.lower():
+            continue
+        p = os.path.join("/kaggle/input", item)
+        if os.path.isdir(p):
+            for root, dirs, files in os.walk(p):
+                if any("flair" in f.lower() and f.endswith((".nii", ".nii.gz")) for f in files):
+                    print(f"[OK] Found BraTS 2019 Source root: {root}")
+                    return root
+                if any(d.upper() in ["HGG", "LGG"] for d in dirs):
+                    print(f"[OK] Found BraTS 2019 Source root with HGG/LGG: {root}")
+                    return root
     return None
 
 
@@ -301,7 +323,9 @@ class BraTS19SourceDataset(Dataset):
             # Resize to CFG.IMAGE_SIZE
             if img.shape[0] != H or img.shape[1] != W:
                 img = np.array(Image.fromarray((img * 255).astype(np.uint8)).resize((W, H))) / 255.0
-                seg_vol = np.array(Image.fromarray(seg_vol).resize((W, H), resample=Image.NEAREST))
+                seg_vol = np.array(Image.fromarray(seg_vol.astype(np.uint8)).resize((W, H), resample=Image.NEAREST)).astype(np.int64)
+            else:
+                seg_vol = seg_vol.astype(np.int64)
 
             img_tensor = torch.from_numpy(img).permute(2, 0, 1).float()
             mask_tensor = torch.from_numpy(seg_vol).long()
@@ -386,13 +410,20 @@ class BraTS20TargetDataset(Dataset):
                 raw_mask = np.array(f["mask"])
                 if raw_mask.ndim == 3:
                     # If one-hot WT/TC/ET, convert to class indices: 0=Bg, 1=NCR, 2=ED, 3=ET
-                    mask = np.zeros((raw_mask.shape[0], raw_mask.shape[1]), dtype=np.int64)
                     if raw_mask.shape[-1] == 3:
+                        mask = np.zeros((raw_mask.shape[0], raw_mask.shape[1]), dtype=np.uint8)
                         mask[raw_mask[..., 0] > 0] = 2  # Edema
                         mask[raw_mask[..., 1] > 0] = 1  # Core
                         mask[raw_mask[..., 2] > 0] = 3  # Enhancing
+                    elif raw_mask.shape[0] == 3:
+                        mask = np.zeros((raw_mask.shape[1], raw_mask.shape[2]), dtype=np.uint8)
+                        mask[raw_mask[0] > 0] = 2  # Edema
+                        mask[raw_mask[1] > 0] = 1  # Core
+                        mask[raw_mask[2] > 0] = 3  # Enhancing
+                    else:
+                        mask = raw_mask[..., 0].astype(np.uint8)
                 else:
-                    mask = raw_mask.astype(np.int64)
+                    mask = raw_mask.astype(np.uint8)
                     mask[mask == 4] = 3
 
             # Normalize to [0, 1]
@@ -401,7 +432,9 @@ class BraTS20TargetDataset(Dataset):
             # Resize
             if img.shape[0] != H or img.shape[1] != W:
                 img = np.array(Image.fromarray((img * 255).astype(np.uint8)).resize((W, H))) / 255.0
-                mask = np.array(Image.fromarray(mask).resize((W, H), resample=Image.NEAREST))
+                mask = np.array(Image.fromarray(mask.astype(np.uint8)).resize((W, H), resample=Image.NEAREST)).astype(np.int64)
+            else:
+                mask = mask.astype(np.int64)
 
             return torch.from_numpy(img).permute(2, 0, 1).float(), torch.from_numpy(mask).long()
 
