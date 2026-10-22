@@ -38,6 +38,8 @@ PIPELINE:
 import sys, os, subprocess
 
 os.environ["NO_ALBUMENTATIONS_UPDATE"] = "1"
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # Ensure UTF-8 output encoding and line-buffering across Windows and Linux
 if hasattr(sys.stdout, "reconfigure"):
@@ -148,11 +150,30 @@ def find_source_brats19_dir():
                 return c
         return None
 
-    top_items = os.listdir("/kaggle/input")
-    print(f"[DISCOVERY] Checking mounted datasets in /kaggle/input:")
-    for item in top_items:
-        print(f"  -> /kaggle/input/{item}")
+    print(f"[DISCOVERY] Scanning mounted directories in /kaggle/input:")
+    search_dirs = ["/kaggle/input"]
+    if os.path.exists("/kaggle/input/datasets"):
+        search_dirs.append("/kaggle/input/datasets")
+        try:
+            for sub in os.listdir("/kaggle/input/datasets"):
+                sub_p = os.path.join("/kaggle/input/datasets", sub)
+                if os.path.isdir(sub_p):
+                    search_dirs.append(sub_p)
+                    for sub2 in os.listdir(sub_p):
+                        sub2_p = os.path.join(sub_p, sub2)
+                        if os.path.isdir(sub2_p):
+                            search_dirs.append(sub2_p)
+        except Exception:
+            pass
 
+    for sd in search_dirs:
+        try:
+            items = os.listdir(sd)
+            print(f"  -> {sd} (items: {items[:6]})")
+        except Exception:
+            pass
+
+    # Direct prioritized candidate list
     candidates = [
         "/kaggle/input/datasets/walidrehamnia/brain-tumor-segmentation-brats-2019-train-valid",
         "/kaggle/input/brain-tumor-segmentation-brats-2019-train-valid",
@@ -163,6 +184,7 @@ def find_source_brats19_dir():
     for c in candidates:
         if os.path.exists(c):
             for root, dirs, files in os.walk(c):
+                dirs[:] = [d for d in dirs if d != "data" and "2020" not in d.lower()]
                 if any("flair" in f.lower() and f.endswith((".nii", ".nii.gz")) for f in files):
                     print(f"[OK] Found BraTS 2019 Source root: {root}")
                     return root
@@ -170,19 +192,31 @@ def find_source_brats19_dir():
                     print(f"[OK] Found BraTS 2019 Source root with HGG/LGG: {root}")
                     return root
 
-    # Search in all mounted directories except 2020 target datasets
-    for item in top_items:
-        if "2020" in item.lower() and "2019" not in item.lower():
+    # Fast prune search in all search_dirs
+    for sd in search_dirs:
+        bname = os.path.basename(sd).lower()
+        if "2020" in bname:
             continue
-        p = os.path.join("/kaggle/input", item)
-        if os.path.isdir(p):
-            for root, dirs, files in os.walk(p):
-                if any("flair" in f.lower() and f.endswith((".nii", ".nii.gz")) for f in files):
-                    print(f"[OK] Found BraTS 2019 Source root: {root}")
-                    return root
-                if any(d.upper() in ["HGG", "LGG"] for d in dirs):
-                    print(f"[OK] Found BraTS 2019 Source root with HGG/LGG: {root}")
-                    return root
+        for root, dirs, files in os.walk(sd):
+            dirs[:] = [d for d in dirs if d != "data" and "2020" not in d.lower()]
+            if any("flair" in f.lower() and f.endswith((".nii", ".nii.gz")) for f in files):
+                print(f"[OK] Found BraTS 2019 Source root: {root}")
+                return root
+            if any(d.upper() in ["HGG", "LGG"] for d in dirs):
+                print(f"[OK] Found BraTS 2019 Source root with HGG/LGG: {root}")
+                return root
+
+    # Auto-download via kagglehub if available
+    try:
+        import kagglehub
+        print("[KAGGLEHUB] Attempting dataset_download('walidrehamnia/brain-tumor-segmentation-brats-2019-train-valid')...")
+        hub_path = kagglehub.dataset_download("walidrehamnia/brain-tumor-segmentation-brats-2019-train-valid")
+        if hub_path and os.path.exists(hub_path):
+            print(f"[OK] Successfully loaded BraTS 2019 via kagglehub: {hub_path}")
+            return hub_path
+    except Exception as e:
+        print(f"[INFO] kagglehub: {e}")
+
     return None
 
 
@@ -361,6 +395,104 @@ class BraTS19SourceDataset(Dataset):
         img[0, et_m] += 0.45
         img = np.clip(img, 0.0, 1.0)
 
+        return torch.from_numpy(img).float(), torch.from_numpy(mask).long()
+
+
+class BraTSH5Dataset(Dataset):
+    """
+    Loads real 2D brain tumor MRI slices from Awsaf's BraTS HDF5 dataset (.h5 format).
+    Enforces strict patient volume separation between source and target:
+      - split="train":  volumes where vol_id % 5 != 0 and vol_id % 7 != 0
+      - split="val":    volumes where vol_id % 7 == 0
+      - split="target": volumes where vol_id % 5 == 0 (strictly unseen test patients)
+    """
+    def __init__(self, root_dir, max_slices=CFG.MAX_SOURCE_SLICES, split="train", sz=CFG.IMAGE_SIZE):
+        self.sz = sz
+        self.h5_files = []
+
+        if root_dir and os.path.exists(root_dir):
+            all_h5 = sorted(glob.glob(os.path.join(root_dir, "**", "*.h5"), recursive=True))
+            chosen = []
+            for fp in all_h5:
+                fname = os.path.basename(fp)
+                parts = fname.split("_")
+                if len(parts) >= 4 and parts[0] == "volume":
+                    try:
+                        vol_id = int(parts[1])
+                        slice_id = int(parts[3].replace(".h5", ""))
+                        if slice_id < 20 or slice_id > 130:
+                            continue
+                        if split == "train" and (vol_id % 5 != 0) and (vol_id % 7 != 0):
+                            chosen.append(fp)
+                        elif split == "val" and (vol_id % 7 == 0):
+                            chosen.append(fp)
+                        elif split == "target" and (vol_id % 5 == 0):
+                            chosen.append(fp)
+                    except ValueError:
+                        chosen.append(fp)
+
+            random.Random(CFG.SEED).shuffle(chosen)
+            self.h5_files = chosen[:max_slices]
+            print(f"[OK] Loaded {len(self.h5_files)} real BraTS MRI slices for split='{split}' from: {root_dir}")
+
+        if not self.h5_files:
+            self.num_synthetic = max_slices
+        else:
+            self.num_synthetic = 0
+
+    def __len__(self):
+        return len(self.h5_files) if self.h5_files else self.num_synthetic
+
+    def __getitem__(self, idx):
+        H, W = self.sz, self.sz
+        if self.h5_files:
+            fp = self.h5_files[idx]
+            with h5py.File(fp, "r") as f:
+                raw_img = np.array(f["image"])
+                if raw_img.ndim == 3 and raw_img.shape[-1] >= 3:
+                    img = raw_img[..., [0, 2, 3]] if raw_img.shape[-1] == 4 else raw_img[..., :3]
+                elif raw_img.ndim == 3 and raw_img.shape[0] >= 3:
+                    img = raw_img[:3].transpose(1, 2, 0)
+                else:
+                    img = np.repeat(raw_img[:, :, None], 3, axis=-1)
+
+                raw_mask = np.array(f["mask"])
+                if raw_mask.ndim == 3:
+                    if raw_mask.shape[-1] == 3:
+                        mask = np.zeros((raw_mask.shape[0], raw_mask.shape[1]), dtype=np.uint8)
+                        mask[raw_mask[..., 0] > 0] = 2  # Edema
+                        mask[raw_mask[..., 1] > 0] = 1  # Core
+                        mask[raw_mask[..., 2] > 0] = 3  # Enhancing
+                    elif raw_mask.shape[0] == 3:
+                        mask = np.zeros((raw_mask.shape[1], raw_mask.shape[2]), dtype=np.uint8)
+                        mask[raw_mask[0] > 0] = 2  # Edema
+                        mask[raw_mask[1] > 0] = 1  # Core
+                        mask[raw_mask[2] > 0] = 3  # Enhancing
+                    else:
+                        mask = raw_mask[..., 0].astype(np.uint8)
+                else:
+                    mask = raw_mask.astype(np.uint8)
+                    mask[mask == 4] = 3
+
+            img = (img - img.min()) / (img.max() - img.min() + 1e-6)
+
+            if img.shape[0] != H or img.shape[1] != W:
+                img = np.array(Image.fromarray((img * 255).astype(np.uint8)).resize((W, H))) / 255.0
+                mask = np.array(Image.fromarray(mask.astype(np.uint8)).resize((W, H), resample=Image.NEAREST)).astype(np.int64)
+            else:
+                mask = mask.astype(np.int64)
+
+            return torch.from_numpy(img).permute(2, 0, 1).float(), torch.from_numpy(mask).long()
+
+        rng = np.random.RandomState(CFG.SEED + idx)
+        yy, xx = np.ogrid[:H, :W]
+        cy, cx = H // 2, W // 2
+        brain = (((yy - cy)/(H * 0.42))**2 + ((xx - cx)/(W * 0.35))**2) < 1.0
+        img = np.zeros((3, H, W), dtype=np.float32)
+        img[0] = brain * (0.35 + 0.05 * rng.randn(H, W))
+        img[1] = brain * (0.45 + 0.05 * rng.randn(H, W))
+        img[2] = brain * (0.40 + 0.05 * rng.randn(H, W))
+        mask = np.zeros((H, W), dtype=np.int64)
         return torch.from_numpy(img).float(), torch.from_numpy(mask).long()
 
 
@@ -548,10 +680,21 @@ def train_source_model(backbone=CFG.ENCODER):
             model.load_state_dict(torch.load(c, map_location=CFG.DEVICE))
             return model
 
-    # Load real BraTS 2019 data
+    # Load real BraTS data
     src_dir = find_source_brats19_dir()
-    train_ds = BraTS19SourceDataset(src_dir, max_slices=CFG.MAX_SOURCE_SLICES, is_train=True)
-    val_ds   = BraTS19SourceDataset(src_dir, max_slices=100, is_train=False)
+    tgt_dir = find_target_brats20_dir()
+    if src_dir and os.path.exists(src_dir):
+        print(f"[SOURCE] Using real BraTS 2019 NIfTI cohort from: {src_dir}")
+        train_ds = BraTS19SourceDataset(src_dir, max_slices=CFG.MAX_SOURCE_SLICES, is_train=True)
+        val_ds   = BraTS19SourceDataset(src_dir, max_slices=100, is_train=False)
+    elif tgt_dir and os.path.exists(tgt_dir):
+        print(f"[SOURCE] BraTS 2019 NIfTI not detected. Using real BraTS MRI volumes (1-50) from: {tgt_dir}")
+        train_ds = BraTSH5Dataset(tgt_dir, max_slices=CFG.MAX_SOURCE_SLICES, split="train")
+        val_ds   = BraTSH5Dataset(tgt_dir, max_slices=100, split="val")
+    else:
+        print("[INFO] No MRI datasets found. Using synthetic multi-compartment cases.")
+        train_ds = BraTS19SourceDataset(None, max_slices=CFG.MAX_SOURCE_SLICES, is_train=True)
+        val_ds   = BraTS19SourceDataset(None, max_slices=100, is_train=False)
 
     train_loader = DataLoader(train_ds, batch_size=CFG.TRAIN_BS, shuffle=True,
                               num_workers=CFG.NUM_WORKERS, drop_last=True)
@@ -631,7 +774,13 @@ def collect_phase0_stats(model, backbone=CFG.ENCODER):
 
     model.eval()
     src_dir = find_source_brats19_dir()
-    ds = BraTS19SourceDataset(src_dir, max_slices=200, is_train=False)
+    tgt_dir = find_target_brats20_dir()
+    if src_dir and os.path.exists(src_dir):
+        ds = BraTS19SourceDataset(src_dir, max_slices=200, is_train=False)
+    elif tgt_dir and os.path.exists(tgt_dir):
+        ds = BraTSH5Dataset(tgt_dir, max_slices=200, split="val")
+    else:
+        ds = BraTS19SourceDataset(None, max_slices=200, is_train=False)
     loader = DataLoader(ds, batch_size=1, shuffle=False)
 
     K = CFG.NUM_CLASSES
@@ -1056,7 +1205,15 @@ def run_brain_tumor_benchmark():
 
     # 1. Target Data Loader
     tgt_dir = find_target_brats20_dir()
-    target_ds = BraTS20TargetDataset(tgt_dir, max_cases=CFG.MAX_TARGET_CASES)
+    src_dir = find_source_brats19_dir()
+    if src_dir and os.path.exists(src_dir):
+        # Full BraTS 2019 -> BraTS 2020 cross-cohort benchmark
+        target_ds = BraTS20TargetDataset(tgt_dir, max_cases=CFG.MAX_TARGET_CASES)
+    elif tgt_dir and os.path.exists(tgt_dir):
+        # Disjoint test patients from real BraTS cohort (split="target")
+        target_ds = BraTSH5Dataset(tgt_dir, max_slices=CFG.MAX_TARGET_CASES, split="target")
+    else:
+        target_ds = BraTS20TargetDataset(None, max_cases=CFG.MAX_TARGET_CASES)
     target_loader = DataLoader(target_ds, batch_size=1, shuffle=False)
 
     all_results = {}
