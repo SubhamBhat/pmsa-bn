@@ -279,53 +279,78 @@ class BraTS19SourceDataset(Dataset):
         if root_dir and os.path.exists(root_dir):
             print(f"[INDEXING] Scanning BraTS 2019 volumes from: {root_dir}...")
             pat_dirs = set()
-            for root, dirs, files in os.walk(root_dir):
-                if any("flair" in f.lower() and f.endswith((".nii", ".nii.gz")) for f in files):
+            for root, dirs, files in os.walk(root_dir, followlinks=True):
+                # Any directory containing .nii or .nii.gz files
+                nii_files = [f for f in files if f.lower().endswith((".nii", ".nii.gz"))]
+                if nii_files:
                     pat_dirs.add(root)
-            pat_dirs = sorted(list(pat_dirs))
+                # Or any subfolder named like BraTS
+                for d in dirs:
+                    if "brats" in d.lower():
+                        pat_dirs.add(os.path.join(root, d))
 
-            print(f"  -> Found {len(pat_dirs)} BraTS 2019 patient volumes.")
+            pat_dirs = sorted(list(pat_dirs))
+            print(f"  -> Found {len(pat_dirs)} candidate BraTS 2019 volume directories.")
             random.Random(CFG.SEED).shuffle(pat_dirs)
 
             # Split volumes for train and val
-            n_val = max(1, int(len(pat_dirs) * 0.20))
+            n_val = max(1, int(len(pat_dirs) * 0.20)) if len(pat_dirs) > 1 else 0
             chosen_pats = pat_dirs[n_val:] if is_train else pat_dirs[:n_val]
 
             count = 0
             for pd in chosen_pats:
-                flair_f = glob.glob(os.path.join(pd, "*_flair.nii*"))
-                t1ce_f  = glob.glob(os.path.join(pd, "*_t1ce.nii*"))
-                t2_f    = glob.glob(os.path.join(pd, "*_t2.nii*"))
-                seg_f   = glob.glob(os.path.join(pd, "*_seg.nii*"))
+                flair_f, t1ce_f, t2_f, seg_f = None, None, None, None
+                try:
+                    for fname in os.listdir(pd):
+                        fl = fname.lower()
+                        fp = os.path.join(pd, fname)
+                        if fl.endswith((".nii", ".nii.gz")):
+                            if "flair" in fl:
+                                flair_f = fp
+                            elif "t1ce" in fl or "t1_ce" in fl or "t1gd" in fl or "t1-ce" in fl:
+                                t1ce_f = fp
+                            elif "t2" in fl and "flair" not in fl:
+                                t2_f = fp
+                            elif "seg" in fl:
+                                seg_f = fp
+                    # Fallback for t1ce if named t1
+                    if not t1ce_f:
+                        for fname in os.listdir(pd):
+                            fl = fname.lower()
+                            if "t1" in fl and fl.endswith((".nii", ".nii.gz")):
+                                t1ce_f = os.path.join(pd, fname)
+                                break
+                except Exception:
+                    continue
 
                 if flair_f and t1ce_f and t2_f and seg_f:
                     try:
-                        seg = load_nifti_volume(seg_f[0])
-                        # Find axial slices containing tumor
+                        seg = load_nifti_volume(seg_f)
                         tumor_counts = seg.sum(axis=(0, 1))
-                        valid_slices = np.where(tumor_counts > 50)[0]
-                        if len(valid_slices) > 0:
-                            # Pick top center slices with largest tumor area
-                            top_slices = valid_slices[np.argsort(tumor_counts[valid_slices])[-4:]]
-                            for s_idx in top_slices:
-                                self.slices.append({
-                                    "flair": flair_f[0], "t1ce": t1ce_f[0],
-                                    "t2": t2_f[0], "seg": seg_f[0],
-                                    "slice_idx": int(s_idx)
-                                })
-                                count += 1
-                                if count >= max_slices:
-                                    break
+                        valid_slices = np.where(tumor_counts > 10)[0]
+                        if len(valid_slices) == 0:
+                            valid_slices = np.where(tumor_counts > 0)[0]
+                        if len(valid_slices) == 0:
+                            valid_slices = np.array([seg.shape[2] // 2])
+                        top_slices = valid_slices[np.argsort(tumor_counts[valid_slices])[-4:]]
+                        for s_idx in top_slices:
+                            self.slices.append({
+                                "flair": flair_f, "t1ce": t1ce_f,
+                                "t2": t2_f, "seg": seg_f,
+                                "slice_idx": int(s_idx)
+                            })
+                            count += 1
+                            if count >= max_slices:
+                                break
                     except Exception as e:
                         continue
                 if count >= max_slices:
                     break
 
             print(f"  -> Successfully extracted {len(self.slices)} 2D tumor slices for {'Train' if is_train else 'Val'}.")
-        
-        # Synthetic fallback if no raw NIfTI files present
-        if not self.slices:
-            print("[INFO] BraTS 2019 NIfTI files not mounted. Using realistic synthetic multi-compartment cases.")
+
+        # If root_dir was None or failed, self.slices is empty. Do NOT set synthetic count if root_dir was supplied!
+        if not self.slices and root_dir is None:
             self.num_synthetic = max_slices
         else:
             self.num_synthetic = 0
@@ -683,18 +708,25 @@ def train_source_model(backbone=CFG.ENCODER):
     # Load real BraTS data
     src_dir = find_source_brats19_dir()
     tgt_dir = find_target_brats20_dir()
+    train_ds = None
     if src_dir and os.path.exists(src_dir):
-        print(f"[SOURCE] Using real BraTS 2019 NIfTI cohort from: {src_dir}")
-        train_ds = BraTS19SourceDataset(src_dir, max_slices=CFG.MAX_SOURCE_SLICES, is_train=True)
-        val_ds   = BraTS19SourceDataset(src_dir, max_slices=100, is_train=False)
-    elif tgt_dir and os.path.exists(tgt_dir):
-        print(f"[SOURCE] BraTS 2019 NIfTI not detected. Using real BraTS MRI volumes (1-50) from: {tgt_dir}")
+        print(f"[SOURCE] Attempting to load real BraTS 2019 NIfTI cohort from: {src_dir}")
+        t_ds = BraTS19SourceDataset(src_dir, max_slices=CFG.MAX_SOURCE_SLICES, is_train=True)
+        v_ds = BraTS19SourceDataset(src_dir, max_slices=100, is_train=False)
+        if len(t_ds.slices) > 0:
+            train_ds, val_ds = t_ds, v_ds
+            print(f"[OK] Successfully verified {len(train_ds)} real BraTS 2019 NIfTI source slices.")
+        else:
+            print("[INFO] BraTS 2019 directory yielded 0 NIfTI slices. Checking real H5 MRI dataset...")
+
+    if train_ds is None and tgt_dir and os.path.exists(tgt_dir):
+        print(f"[SOURCE] Using real BraTS MRI volumes from: {tgt_dir}")
         train_ds = BraTSH5Dataset(tgt_dir, max_slices=CFG.MAX_SOURCE_SLICES, split="train")
         val_ds   = BraTSH5Dataset(tgt_dir, max_slices=100, split="val")
-    else:
-        print("[INFO] No MRI datasets found. Using synthetic multi-compartment cases.")
-        train_ds = BraTS19SourceDataset(None, max_slices=CFG.MAX_SOURCE_SLICES, is_train=True)
-        val_ds   = BraTS19SourceDataset(None, max_slices=100, is_train=False)
+        print(f"[OK] Successfully verified {len(train_ds)} real BraTS H5 source slices.")
+
+    if train_ds is None:
+        raise RuntimeError("CRITICAL ERROR: No real BraTS MRI data found in /kaggle/input! Please mount at least one BraTS dataset.")
 
     train_loader = DataLoader(train_ds, batch_size=CFG.TRAIN_BS, shuffle=True,
                               num_workers=CFG.NUM_WORKERS, drop_last=True)
@@ -775,12 +807,15 @@ def collect_phase0_stats(model, backbone=CFG.ENCODER):
     model.eval()
     src_dir = find_source_brats19_dir()
     tgt_dir = find_target_brats20_dir()
+    ds = None
     if src_dir and os.path.exists(src_dir):
-        ds = BraTS19SourceDataset(src_dir, max_slices=200, is_train=False)
-    elif tgt_dir and os.path.exists(tgt_dir):
+        check_ds = BraTS19SourceDataset(src_dir, max_slices=200, is_train=False)
+        if len(check_ds.slices) > 0:
+            ds = check_ds
+    if ds is None and tgt_dir and os.path.exists(tgt_dir):
         ds = BraTSH5Dataset(tgt_dir, max_slices=200, split="val")
-    else:
-        ds = BraTS19SourceDataset(None, max_slices=200, is_train=False)
+    if ds is None:
+        raise RuntimeError("CRITICAL ERROR: No real BraTS MRI data available for Phase 0 stats!")
     loader = DataLoader(ds, batch_size=1, shuffle=False)
 
     K = CFG.NUM_CLASSES
@@ -1206,14 +1241,20 @@ def run_brain_tumor_benchmark():
     # 1. Target Data Loader
     tgt_dir = find_target_brats20_dir()
     src_dir = find_source_brats19_dir()
+    has_real_brats19 = False
     if src_dir and os.path.exists(src_dir):
-        # Full BraTS 2019 -> BraTS 2020 cross-cohort benchmark
+        check_ds = BraTS19SourceDataset(src_dir, max_slices=5, is_train=True)
+        if len(check_ds.slices) > 0:
+            has_real_brats19 = True
+
+    if has_real_brats19:
+        print("[DATA] Target dataset: BraTS 2020 cross-challenge target slices.")
         target_ds = BraTS20TargetDataset(tgt_dir, max_cases=CFG.MAX_TARGET_CASES)
     elif tgt_dir and os.path.exists(tgt_dir):
-        # Disjoint test patients from real BraTS cohort (split="target")
+        print("[DATA] Target dataset: Real unseen test patients from BraTS cohort (split='target').")
         target_ds = BraTSH5Dataset(tgt_dir, max_slices=CFG.MAX_TARGET_CASES, split="target")
     else:
-        target_ds = BraTS20TargetDataset(None, max_cases=CFG.MAX_TARGET_CASES)
+        raise RuntimeError("CRITICAL ERROR: Target BraTS H5 dataset not found in /kaggle/input!")
     target_loader = DataLoader(target_ds, batch_size=1, shuffle=False)
 
     all_results = {}
