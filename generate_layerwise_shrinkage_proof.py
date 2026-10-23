@@ -181,8 +181,9 @@ ax_math.text(0.01, 0.95, summary_text, fontsize=9.5, va="top", ha="left",
 fig.suptitle("Visual & Mathematical Proof: Mask Resolution Shrinkage & Empirical Bayes Normalization",
              fontsize=14, fontweight="bold", y=0.985)
 
-out_png = os.path.join(BASE_DIR, "fig_layerwise_shrinkage_proof.png")
-out_pdf = os.path.join(BASE_DIR, "fig_layerwise_shrinkage_proof.pdf")
+os.makedirs(os.path.join(BASE_DIR, "figures"), exist_ok=True)
+  out_png = os.path.join(BASE_DIR, "figures", "fig_layerwise_shrinkage_proof.png")
+out_pdf = os.path.join(BASE_DIR, "figures", "fig_layerwise_shrinkage_proof.pdf")
 plt.savefig(out_png, dpi=300, bbox_inches="tight")
 plt.savefig(out_pdf, bbox_inches="tight")
 plt.close()

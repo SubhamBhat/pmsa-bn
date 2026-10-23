@@ -19,7 +19,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-OUT_DIR = os.path.dirname(os.path.abspath(__file__))
+OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "figures")
+    os.makedirs(OUT_DIR, exist_ok=True)
 ARTIFACT_DIR = r"C:\Users\Subham Bhat\.gemini\antigravity\brain\32a05e37-89f2-4470-b2e2-79911d285c7e"
 
 # Academic styling

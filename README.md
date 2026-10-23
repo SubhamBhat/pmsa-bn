@@ -282,7 +282,7 @@ $$
 ### Visual Proof 1: Layerwise Mask Shrinkage Through ResNet-34
 
 
-![Layerwise Shrinkage Proof](fig_layerwise_shrinkage_proof.png)
+![Layerwise Shrinkage Proof](figures/fig_layerwise_shrinkage_proof.png)
 
 
 * **Top Row:** Real patient fundus image and Optic Cup mask downsampled through ResNet-34 stages (`Input` $\to$ `layer1` $\to$ `layer2` $\to$ `layer3` $\to$ `layer4`). Notice how at `layer4` ($8 \times 8$), the entire optic cup is represented by only $0.77$ effective pixels.
@@ -298,7 +298,7 @@ $$
 ### Visual Proof 2: Real Clinical Patient Proof (Fundus Optic Cup)
 
 
-![Visual Proof Fundus](fig_shrinkage_visual_proof.png)
+![Visual Proof Fundus](figures/fig_shrinkage_visual_proof.png)
 
 
 This verification utilizes real patient data from the Drishti-GS test set (`drishtiGS_001.png`):
@@ -316,7 +316,7 @@ This verification utilizes real patient data from the Drishti-GS test set (`dris
 ### Visual Proof 3: Batch-Size Invariance Across Imaging Modalities
 
 
-![Batch Size Invariance](fig1_batch_size_3panel.png)
+![Batch Size Invariance](figures/fig1_batch_size_3panel.png)
 
 
 Across Dermoscopy ($\text{PH}^2 \to \text{ISIC}$), Fundus ($\text{REFUGE} \to \text{Drishti}$), and CXR ($\text{Montgomery} \to \text{Shenzhen}$):
@@ -1332,7 +1332,7 @@ python generate_best_batch_fig.py
        ...
    )
    ```
-4. Paste and execute the script in a single cell. It will auto-detect inputs, compute Phase 0 priors, run test-time adaptation at $B = 1$, output statistical significance ($t$-test and Wilcoxon $p$-values), and save publication plots (`fig1_batch_size.png` and `fig_cmp_<target>.png`).
+4. Paste and execute the script in a single cell. It will auto-detect inputs, compute Phase 0 priors, run test-time adaptation at $B = 1$, output statistical significance ($t$-test and Wilcoxon $p$-values), and save publication plots (`figures/fig1_batch_size.png` and `figures/fig_cmp_<target>.png`).
 
 #### Option B: Neuro-Oncology MRI Benchmark (`kaggle_brain_tumor_single_cell.py`)
 1. Create a Kaggle notebook and attach:

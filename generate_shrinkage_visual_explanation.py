@@ -25,8 +25,9 @@ IMG_PATH = os.path.join(REAL_DIR, "drishtiGS_001.png")
 OD_PATH  = os.path.join(REAL_DIR, "drishtiGS_001_ODsegSoftmap.png")
 CUP_PATH = os.path.join(REAL_DIR, "drishtiGS_001_cupsegSoftmap.png")
 
-OUT_PNG  = os.path.join(BASE_DIR, "fig_shrinkage_visual_proof.png")
-OUT_PDF  = os.path.join(BASE_DIR, "fig_shrinkage_visual_proof.pdf")
+os.makedirs(os.path.join(BASE_DIR, "figures"), exist_ok=True)
+  OUT_PNG  = os.path.join(BASE_DIR, "figures", "fig_shrinkage_visual_proof.png")
+OUT_PDF  = os.path.join(BASE_DIR, "figures", "fig_shrinkage_visual_pdf.pdf")
 
 # ── Load and Preprocess Real Clinical Image & Masks ────────────────────────────
 assert os.path.exists(IMG_PATH), f"Missing {IMG_PATH}"
