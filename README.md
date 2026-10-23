@@ -52,7 +52,7 @@ For any BN channel, the statistics pooled over an image decompose over its $`K`$
 ```math
 \mu=\sum_{k}\pi_k\,\mu_k,\qquad
 \sigma^2=\underbrace{\sum_{k}\pi_k\,\sigma_k^2}_{\text{within-class}}+\underbrace{\sum_{k}\pi_k\,(\mu_k-\mu)^2}_{\text{between-class}}
-\tag{1}
+\qquad\qquad(1)
 ```
 
 where $`\pi_k`$ is the fraction of positions belonging to class $`k`$ and $`(\mu_k,\sigma_k^2)`$ its class-conditional statistics. AdaBN re-estimates the left-hand side, so it reacts to **two different changes**:
@@ -104,19 +104,19 @@ with $`\tau_{hi}=0.9`$ and $`\tau_{lo}=0.1`$. All other pixels are uncertain and
 ```math
 \hat\mu_k=\frac{1}{N_k}\sum_{i,j}w_k(i,j)\,x(i,j),\qquad
 \hat\sigma_k^2=\frac{1}{N_k}\sum_{i,j}w_k(i,j)\,\big(x(i,j)-\hat\mu_k\big)^2
-\tag{2}
+\qquad\qquad(2)
 ```
 
 **Pseudo-count shrinkage** (details in [Section 3](#3-bayesian-shrinkage-in-depth)):
 
 ```math
 \tilde\mu_k=\gamma_k\,\hat\mu_k+(1-\gamma_k)\,\mu^{src}_k,\qquad \gamma_k=\frac{N_k}{N_k+\kappa_\mu}
-\tag{3}
+\qquad\qquad(3)
 ```
 
 ```math
 \tilde\sigma_k^2=\eta_k\,\hat\sigma_k^2+(1-\eta_k)\,\sigma^{2,src}_k,\qquad \eta_k=\frac{(N_k-1)_+}{(N_k-1)_++\kappa_\sigma}
-\tag{4}
+\qquad\qquad(4)
 ```
 
 **Prior matching.** The classes are recombined as in Eq. (1), but with the **source** proportions:
@@ -124,7 +124,7 @@ with $`\tau_{hi}=0.9`$ and $`\tau_{lo}=0.1`$. All other pixels are uncertain and
 ```math
 \mu_{PM}=\sum_k\pi^{src}_k\,\tilde\mu_k,\qquad
 \sigma^2_{PM}=\sum_k\pi^{src}_k\,\tilde\sigma_k^2+\sum_k\pi^{src}_k\,(\tilde\mu_k-\mu_{PM})^2
-\tag{5}
+\qquad\qquad(5)
 ```
 
 **Shift-adaptive mixing.** Each channel's shift is measured by the squared 2-Wasserstein distance between $`\mathcal N(\mu_{PM,c},\sigma^2_{PM,c})`$ and $`\mathcal N(\mu^{src}_c,\sigma^{2,src}_c)`$, normalized by the source variance, and mapped to a mixing weight:
@@ -132,18 +132,18 @@ with $`\tau_{hi}=0.9`$ and $`\tau_{lo}=0.1`$. All other pixels are uncertain and
 ```math
 D_c=\frac{(\mu_{PM,c}-\mu^{src}_c)^2+(\sigma_{PM,c}-\sigma^{src}_c)^2}{\sigma^{2,src}_c+\epsilon},\qquad
 \alpha_c=1-e^{-D_c/\tau}
-\tag{6}
+\qquad\qquad(6)
 ```
 
 ```math
 \hat\mu_c=\alpha_c\,\mu_{PM,c}+(1-\alpha_c)\,\mu^{src}_c,\qquad
 \hat\sigma^2_c=\alpha_c\,\sigma^2_{PM,c}+(1-\alpha_c)\,\sigma^{2,src}_c
-\tag{7}
+\qquad\qquad(7)
 ```
 
 ```math
 y_c=\gamma^{BN}_c\,\frac{x_c-\hat\mu_c}{\sqrt{\hat\sigma^2_c+\epsilon_{BN}}}+\beta^{BN}_c
-\tag{8}
+\qquad\qquad(8)
 ```
 
 An unshifted channel keeps its source statistics ($`\alpha_c\approx 0`$); a strongly shifted channel adopts the target statistics ($`\alpha_c\to 1`$). One temperature $`\tau`$ controls the transition and is chosen per **source** domain, without target data. The segmentation is the arg max of pass 2, and all statistics are reset before the next image.
