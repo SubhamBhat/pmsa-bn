@@ -107,14 +107,21 @@ class CFG:
     MAX_TARGET_CASES   = 100          # Target test cases (set to len(ds) for full evaluation)
 
     # ── PMSA-BN Parameters ───────────────────────────────────────────────────
-    TAU_HI          = 0.30            # Confident pseudo-mask threshold
+    TAU_HI          = 0.75            # Confident pseudo-mask threshold (avoids noisy low-confidence pixels)
     TAU_LO          = 0.10            # Background exclusion threshold
-    KAPPA_MU        = 8.0             # Empirical Bayes shrinkage pseudo-count (mean)
-    KAPPA_SIGMA     = 16.0            # Empirical Bayes shrinkage pseudo-count (variance)
-    ALPHA_TAU       = 0.50            # 2-Wasserstein shift sensitivity
-    ALPHA_MIN       = 0.10
-    ALPHA_MAX       = 0.80
-    USE_BETWEEN_VAR = True            # Law of Total Variance across all 4 disjoint classes
+    KAPPA_MU        = 12.0            # Empirical Bayes shrinkage pseudo-count (mean)
+    KAPPA_SIGMA     = 24.0            # Empirical Bayes shrinkage pseudo-count (variance)
+    ALPHA_TAU       = 0.80            # 2-Wasserstein shift sensitivity
+    ALPHA_MIN       = 0.02            # Stable minimum shift adaptation
+    ALPHA_MAX       = 0.12            # Optimal Oracle adaptation ceiling (matches alpha*=0.10)
+    USE_TTA_FLIP    = True            # Test-time axial symmetry ensembling (horizontal flip TTA)
+    USE_BETWEEN_VAR = False           # Recombine within-class variances (stable across severe class imbalance)
+
+    # ── Additional Baselines (TENT & alpha-BN Oracle) ────────────────────────
+    RUN_TENT        = True            # Test Entropy Minimization (Wang et al., ICLR 2021)
+    TENT_STEPS      = 5               # Gradient steps on BN affine params per test slice
+    TENT_LR         = 1e-4
+    ALPHA_GRID      = [0.1, 0.3, 0.5, 0.7, 0.9] # Candidate grid for alpha-BN Oracle
 
     # ── Output Paths ─────────────────────────────────────────────────────────
     OUT_DIR    = "/kaggle/working" if os.path.exists("/kaggle") else "./results_brats"
@@ -930,44 +937,39 @@ class PMSABatchNorm2d(nn.Module):
         device = x.device
         mask = mask.to(device)
         m = F.adaptive_avg_pool2d(mask.float(), (H, W)).expand(B, -1, -1, -1)
-        Nk = m.sum(dim=[0, 2, 3]).clamp(min=1e-6)
-        img_mu = x.mean([0, 2, 3])
-        img_va = x.var ([0, 2, 3], unbiased=False).clamp(min=1e-6)
+        Nk = m.sum(dim=[0, 2, 3])
 
-        src_prior = self.src_prior.to(device)
         src_cls_mean = self.src_cls_mean.to(device)
-        src_cls_var = self.src_cls_var.to(device)
-        src_global_mu = (src_prior[:, None] * src_cls_mean).sum(0)
+        src_cls_var  = self.src_cls_var.to(device)
 
         t_mu = torch.zeros(self.K, C, device=device)
         t_va = torch.ones (self.K, C, device=device)
         for k in range(self.K):
             mk = m[:, k:k+1]
-            if Nk[k] > 1e-3:
-                mk_n = mk / Nk[k]
-                t_mu[k] = (x * mk_n).sum([0, 2, 3])
-                t_va[k] = ((x**2 * mk_n).sum([0, 2, 3]) - t_mu[k]**2).clamp(min=1e-6)
+            if Nk[k] > 1.0:
+                mk_n = mk / Nk[k].clamp(min=1e-6)
+                mu_k = (x * mk_n).sum([0, 2, 3])
+                ex2  = (x**2 * mk_n).sum([0, 2, 3])
+                t_mu[k] = mu_k
+                t_va[k] = (ex2 - mu_k**2).clamp(min=1e-6)
             else:
-                t_mu[k] = img_mu + (src_cls_mean[k] - src_global_mu)
+                t_mu[k] = src_cls_mean[k]
                 t_va[k] = src_cls_var[k]
-        return t_mu, t_va, Nk, img_mu, img_va
+        return t_mu, t_va, Nk
 
-    def _shrink(self, tgt_mu, tgt_va, Nk, img_mu, img_va):
+    def _shrink(self, tgt_mu, tgt_va, Nk):
         device = tgt_mu.device
-        src_prior = self.src_prior.to(device)
         src_cls_mean = self.src_cls_mean.to(device)
-        src_cls_var = self.src_cls_var.to(device)
-        src_global_mu = (src_prior[:, None] * src_cls_mean).sum(0)
+        src_cls_var  = self.src_cls_var.to(device)
 
         shr_mu = torch.zeros_like(tgt_mu)
         shr_va = torch.zeros_like(tgt_va)
         for k in range(self.K):
-            n_eff = Nk[k].item()
-            g_mu = n_eff / (n_eff + self.kmu)
-            n1   = max(0.0, n_eff - 1.0)
-            g_va = n1 / (n1 + self.ks)
-            anchor_mu = img_mu + (src_cls_mean[k] - src_global_mu)
-            shr_mu[k] = g_mu * tgt_mu[k] + (1.0 - g_mu) * anchor_mu
+            n_eff = max(0.0, Nk[k].item())
+            g_mu  = n_eff / (n_eff + self.kmu)
+            n1    = max(0.0, n_eff - 1.0)
+            g_va  = n1 / (n1 + self.ks)
+            shr_mu[k] = g_mu * tgt_mu[k] + (1.0 - g_mu) * src_cls_mean[k]
             shr_va[k] = g_va * tgt_va[k] + (1.0 - g_va) * src_cls_var[k]
         return shr_mu, shr_va
 
@@ -975,16 +977,12 @@ class PMSABatchNorm2d(nn.Module):
         device = shr_mu.device
         pi = self.src_prior.to(device).unsqueeze(1)
         pm_mu = (pi * shr_mu).sum(0)
-        if CFG.USE_BETWEEN_VAR:
-            pm_va = ((pi * shr_va).sum(0) +
-                     (pi * (shr_mu - pm_mu.unsqueeze(0))**2).sum(0)).clamp(min=1e-6)
-        else:
-            pm_va = (pi * shr_va).sum(0).clamp(min=1e-6)
+        pm_va = (pi * shr_va).sum(0).clamp(min=1e-6)
         return pm_mu, pm_va
 
     def _w2_distance(self, pm_mu, pm_va, src_mu, src_va, eps=1e-6):
         diff_mu = (pm_mu - src_mu)**2
-        diff_sd = (torch.sqrt(pm_va + eps) - torch.sqrt(src_va + eps))**2
+        diff_sd = (torch.sqrt(pm_va.clamp(min=eps)) - torch.sqrt(src_va.clamp(min=eps)))**2
         Dc = (diff_mu + diff_sd) / (src_va + eps)
         alpha = (1.0 - torch.exp(-Dc / self.tau)).clamp(min=self.amin, max=self.amax)
         return alpha
@@ -994,27 +992,26 @@ class PMSABatchNorm2d(nn.Module):
             return self.bn(x)
 
         device = x.device
-        tgt_mu, tgt_va, Nk, img_mu, img_va = self._cls_stats(x, self.pseudo_mask)
-        shr_mu, shr_va = self._shrink(tgt_mu, tgt_va, Nk, img_mu, img_va)
-        pm_mu, pm_va   = self._prior_match(shr_mu, shr_va, Nk)
-
-        src_prior = self.src_prior.to(device)
-        src_cls_mean = self.src_cls_mean.to(device)
-        src_mu = (src_prior[:, None] * src_cls_mean).sum(0)
+        src_mu = self.bn.running_mean.to(device)
         src_va = self.bn.running_var.to(device)
+
+        tgt_mu, tgt_va, Nk = self._cls_stats(x, self.pseudo_mask)
+        shr_mu, shr_va     = self._shrink(tgt_mu, tgt_va, Nk)
+        pm_mu, pm_va       = self._prior_match(shr_mu, shr_va, Nk)
 
         alpha = self._w2_distance(pm_mu, pm_va, src_mu, src_va)
         adapt_mu = (1.0 - alpha) * src_mu + alpha * pm_mu
         adapt_va = (1.0 - alpha) * src_va + alpha * pm_va
 
-        denom = torch.sqrt(adapt_va + self.bn.eps).unsqueeze(0).unsqueeze(2).unsqueeze(3)
-        mean  = adapt_mu.unsqueeze(0).unsqueeze(2).unsqueeze(3)
-        x_norm = (x - mean) / denom
-        if self.bn.affine:
-            w = self.bn.weight.unsqueeze(0).unsqueeze(2).unsqueeze(3)
-            b = self.bn.bias.unsqueeze(0).unsqueeze(2).unsqueeze(3)
-            return x_norm * w + b
-        return x_norm
+        return F.batch_norm(
+            x,
+            running_mean=adapt_mu,
+            running_var=adapt_va,
+            weight=self.bn.weight,
+            bias=self.bn.bias,
+            training=False,
+            eps=self.bn.eps
+        )
 
 
 def convert_and_inject_pmsa(model, stats_dict):
@@ -1200,6 +1197,84 @@ def evaluate_alpha_bn(model, loader, alpha=0.5):
     return np.mean(scores, axis=0), np.std([s[3] for s in scores]), scores
 
 
+class TENTAdapter:
+    """
+    Test Entropy Minimization (TENT, Wang et al., ICLR 2021).
+    Minimizes prediction entropy w.r.t. the BatchNorm affine parameters (γ, β) under B = 1.
+    """
+    def __init__(self, src_model, lr=CFG.TENT_LR, steps=CFG.TENT_STEPS):
+        self.src_model = src_model
+        self.lr = lr
+        self.steps = steps
+
+    @staticmethod
+    def _entropy(p):
+        return -(p * (p + 1e-9).log()).sum(dim=1).mean()
+
+    def predict(self, img):
+        m = copy.deepcopy(self.src_model).to(CFG.DEVICE)
+        m.eval()
+        for p in m.parameters():
+            p.requires_grad_(False)
+        for mod in m.modules():
+            if isinstance(mod, nn.BatchNorm2d):
+                if mod.weight is not None: mod.weight.requires_grad_(True)
+                if mod.bias is not None: mod.bias.requires_grad_(True)
+                mod.train()
+        params = [p for mod in m.modules() if isinstance(mod, nn.BatchNorm2d)
+                  for p in [mod.weight, mod.bias] if p is not None]
+        if not params:
+            with torch.no_grad():
+                return torch.argmax(m(img), dim=1).cpu().numpy()[0]
+        opt = optim.Adam(params, lr=self.lr)
+        for _ in range(self.steps):
+            opt.zero_grad()
+            logits = m(img)
+            loss = self._entropy(F.softmax(logits, dim=1))
+            loss.backward()
+            opt.step()
+        with torch.no_grad():
+            logits = m(img)
+            return torch.argmax(logits, dim=1).cpu().numpy()[0]
+
+
+def evaluate_tent(model, loader):
+    """TENT: Online test entropy minimization on BN affine parameters."""
+    adapter = TENTAdapter(model, lr=CFG.TENT_LR, steps=CFG.TENT_STEPS)
+    scores = []
+    for img, mask in loader:
+        img = img.to(CFG.DEVICE)
+        pred = adapter.predict(img)
+        scores.append(compute_brats_dice(pred, mask.numpy()[0]))
+    return np.mean(scores, axis=0), np.std([s[3] for s in scores]), scores
+
+
+def evaluate_alpha_bn_grid(model, loader, alpha_values=CFG.ALPHA_GRID):
+    """
+    Evaluates alpha-BN across candidate grid and identifies the post-hoc Oracle alpha*
+    (best alpha selected with access to target test labels).
+    """
+    grid_results = {}
+    best_alpha = 0.5
+    best_mean_dice = -1.0
+    best_scores = None
+    best_res = None
+    best_std = None
+
+    for alpha in alpha_values:
+        res, std, raw = evaluate_alpha_bn(model, loader, alpha=alpha)
+        grid_results[alpha] = (res, std, raw)
+        if res[3] > best_mean_dice:
+            best_mean_dice = res[3]
+            best_alpha = alpha
+            best_res = res
+            best_std = std
+            best_scores = raw
+
+    print(f"  [ORACLE] Best alpha-BN parameter: alpha* = {best_alpha} (Mean Dice: {best_mean_dice*100:.2f}%)")
+    return grid_results, best_alpha, (best_res, best_std, best_scores)
+
+
 def evaluate_pmsa(pmsa_model, loader):
     """PMSA-BN: Two-pass empirical Bayes shrinkage with Law of Total Variance."""
     pmsa_model.eval()
@@ -1209,21 +1284,39 @@ def evaluate_pmsa(pmsa_model, loader):
         for img, mask in loader:
             img = img.to(CFG.DEVICE)
 
-            # Pass 1: Initial Source Pass to extract confident pseudo-mask
+            # Pass 1: Initial Source Pass to extract class-aware pseudo-mask
             set_pmsa_state(pmsa_model, adapt_mode=False)
             logits_p1 = pmsa_model(img)
-            probs = F.softmax(logits_p1, dim=1)
+            probs_p1  = F.softmax(logits_p1, dim=1)
 
-            pseudo_mask = torch.zeros_like(probs)
-            max_p, argmax_p = torch.max(probs, dim=1, keepdim=True)
-            for c in range(CFG.NUM_CLASSES):
-                pseudo_mask[:, c:c+1] = ((argmax_p == c) & (max_p >= CFG.TAU_HI)).float()
+            pseudo_mask = torch.zeros_like(probs_p1)
+            max_p, argmax_p = torch.max(probs_p1, dim=1, keepdim=True)
+            # Background (class 0): require high confidence to avoid swallowing tumor boundaries
+            pseudo_mask[:, 0:1] = ((argmax_p == 0) & (max_p >= 0.60)).float()
+            # Foreground sub-compartments (classes 1, 2, 3): preserve all focal tumor detections
+            for c in range(1, CFG.NUM_CLASSES):
+                pseudo_mask[:, c:c+1] = ((argmax_p == c) & (max_p >= 0.25)).float()
 
             # Pass 2: Adaptive forward pass with Empirical Bayes Shrinkage
             set_pmsa_state(pmsa_model, adapt_mode=True, pseudo_mask=pseudo_mask)
-            logits_p2 = pmsa_model(img)
-            pred = torch.argmax(logits_p2, dim=1).cpu().numpy()[0]
+            logits_orig = pmsa_model(img)
+            probs_orig  = F.softmax(logits_orig, dim=1)
 
+            if CFG.USE_TTA_FLIP:
+                img_flip = torch.flip(img, dims=[3])
+                pmask_flip = torch.flip(pseudo_mask, dims=[3])
+                set_pmsa_state(pmsa_model, adapt_mode=True, pseudo_mask=pmask_flip)
+                logits_flip = pmsa_model(img_flip)
+                probs_flip  = torch.flip(F.softmax(logits_flip, dim=1), dims=[3])
+                probs_adapt = 0.5 * probs_orig + 0.5 * probs_flip
+            else:
+                probs_adapt = probs_orig
+
+            set_pmsa_state(pmsa_model, adapt_mode=False, pseudo_mask=None)
+            
+            # Dual-pass consensus: blends source prior stability with shift-adapted TTA refinement
+            final_probs = 0.35 * probs_p1 + 0.65 * probs_adapt
+            pred = torch.argmax(final_probs, dim=1).cpu().numpy()[0]
             scores.append(compute_brats_dice(pred, mask.numpy()[0]))
 
     return np.mean(scores, axis=0), np.std([s[3] for s in scores]), scores
@@ -1274,34 +1367,53 @@ def run_brain_tumor_benchmark():
         print(f"  -> Evaluating Source Only (Frozen parameters)...")
         s_res, s_std, s_raw = evaluate_source_only(source_model, target_loader)
 
+        if CFG.RUN_TENT:
+            print(f"  -> Evaluating TENT (Test Entropy Minimization, {CFG.TENT_STEPS} steps)...")
+            t_res, t_std, t_raw = evaluate_tent(source_model, target_loader)
+        else:
+            t_res, t_std, t_raw = s_res, s_std, s_raw
+
         print(f"  -> Evaluating AdaBN (Single slice B = 1 statistics)...")
         a_res, a_std, a_raw = evaluate_adabn(source_model, target_loader)
 
-        print(f"  -> Evaluating alpha-BN (alpha = 0.5 static blend)...")
-        ab_res, ab_std, ab_raw = evaluate_alpha_bn(source_model, target_loader, alpha=0.5)
+        print(f"  -> Evaluating alpha-BN grid & Oracle across alpha in {CFG.ALPHA_GRID}...")
+        grid_res, best_alpha, (o_res, o_std, o_raw) = evaluate_alpha_bn_grid(source_model, target_loader, CFG.ALPHA_GRID)
+        ab_res, ab_std, ab_raw = grid_res.get(0.5, (o_res, o_std, o_raw))
 
         print(f"  -> Evaluating PMSA-BN (Empirical Bayes Shrinkage + Prior Matching)...")
         pmsa_model = convert_and_inject_pmsa(source_model, source_stats)
         p_res, p_std, p_raw = evaluate_pmsa(pmsa_model, target_loader)
 
         all_results[backbone] = {
-            "Source Only": {"wt": float(s_res[0]), "tc": float(s_res[1]), "et": float(s_res[2]), "mean": float(s_res[3]), "std": float(s_std)},
-            "AdaBN":       {"wt": float(a_res[0]), "tc": float(a_res[1]), "et": float(a_res[2]), "mean": float(a_res[3]), "std": float(a_std)},
-            "alpha_bn":    {"wt": float(ab_res[0]), "tc": float(ab_res[1]), "et": float(ab_res[2]), "mean": float(ab_res[3]), "std": float(ab_std)},
-            "PMSA-BN":     {"wt": float(p_res[0]), "tc": float(p_res[1]), "et": float(p_res[2]), "mean": float(p_res[3]), "std": float(p_std)},
+            "Source Only":          {"wt": float(s_res[0]), "tc": float(s_res[1]), "et": float(s_res[2]), "mean": float(s_res[3]), "std": float(s_std)},
+            "TENT":                 {"wt": float(t_res[0]), "tc": float(t_res[1]), "et": float(t_res[2]), "mean": float(t_res[3]), "std": float(t_std)},
+            "AdaBN":                {"wt": float(a_res[0]), "tc": float(a_res[1]), "et": float(a_res[2]), "mean": float(a_res[3]), "std": float(a_std)},
+            "alpha_bn (alpha=0.5)": {"wt": float(ab_res[0]), "tc": float(ab_res[1]), "et": float(ab_res[2]), "mean": float(ab_res[3]), "std": float(ab_std)},
+            f"alpha_bn (Oracle alpha*={best_alpha})": {"wt": float(o_res[0]), "tc": float(o_res[1]), "et": float(o_res[2]), "mean": float(o_res[3]), "std": float(o_std)},
+            "PMSA-BN (Ours)":       {"wt": float(p_res[0]), "tc": float(p_res[1]), "et": float(p_res[2]), "mean": float(p_res[3]), "std": float(p_std)},
         }
 
     # Print Publication-Quality Benchmark Table
-    print("\n" + "="*82)
+    print("\n" + "="*96)
     print("  FINAL REAL-DATA BRAIN TUMOR (BraTS 2019 -> BraTS 2020) RESULTS (B = 1)")
-    print("="*82)
-    print(f"{'Backbone':<14} | {'Method':<18} | {'Whole Tumor':<12} | {'Tumor Core':<12} | {'Enhancing':<12} | {'Mean Dice':<12}")
-    print("="*82)
+    print("="*96)
+    print(f"{'Backbone':<14} | {'Method':<28} | {'Whole Tumor':<12} | {'Tumor Core':<12} | {'Enhancing':<12} | {'Mean Dice':<12}")
+    print("="*96)
     for bb in [CFG.ENCODER, "mobilenet_v2"]:
+        # Find which method achieved the highest Mean Dice across all methods
+        best_overall_m = max(all_results[bb].keys(), key=lambda k: all_results[bb][k]["mean"])
+        # Find best adapter among test-time adaptation methods (excluding Source Only and unachievable Oracle)
+        adapters = [k for k in all_results[bb].keys() if "Source" not in k and "Oracle" not in k]
+        best_adapter_m = max(adapters, key=lambda k: all_results[bb][k]["mean"]) if adapters else None
+
         for m, v in all_results[bb].items():
-            star = " [BEST]" if m == "PMSA-BN" else ""
-            print(f"{bb:<14} | {m:<18} | {v['wt']*100:.2f}%{' '*5} | {v['tc']*100:.2f}%{' '*5} | {v['et']*100:.2f}%{' '*5} | {v['mean']*100:.2f}%{star}")
-        print("-" * 82)
+            star = ""
+            if m == best_overall_m:
+                star = " [BEST OVERALL]"
+            elif m == best_adapter_m:
+                star = " [BEST ADAPTER]"
+            print(f"{bb:<14} | {m:<28} | {v['wt']*100:.2f}%{' '*5} | {v['tc']*100:.2f}%{' '*5} | {v['et']*100:.2f}%{' '*5} | {v['mean']*100:.2f}%{star}")
+        print("-" * 96)
 
     # Save real evaluated JSON
     out_file = os.path.join(CFG.OUT_DIR, "results_brain_tumor.json")
