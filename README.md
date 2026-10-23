@@ -223,7 +223,7 @@ For $`N`$ Gaussian samples the sample mean and variance have
 
 ```math
 \mathrm{Var}(\bar x)=\frac{\sigma^2}{N},\qquad
-\mathrm{Var}(s^2)=\frac{2\sigma^4}{N-1}\ \xrightarrow{\ N\to1\ }\ \infty .
+\mathrm{Var}(s^2)=\frac{2\sigma^4}{N-1}\to\infty\quad\text{as }N\to1 .
 ```
 
 At the bottleneck a small cup has $`N\approx0.6`$, so the variance estimate is undefined, and with $`N\approx 2`$ it is extremely noisy. A variance that is too small blows up the normalized activations ($`y\propto 1/\sqrt{\hat\sigma^2+\epsilon}`$); a variance that is too large flattens them. This affects **class-conditional** statistics. (AdaBN pools all pixels, so it does not have this problem, but it has the confound of Section 1.1 instead. PMSA-BN avoids the confound and needs shrinkage to keep its class statistics stable.)
@@ -531,7 +531,7 @@ For $`x_1,\dots,x_N\stackrel{iid}{\sim}\mathcal N(\mu,\sigma^2)`$ and $`s^2=\fra
 
 ```math
 \mathrm{Var}\!\Big(\frac{(N-1)s^2}{\sigma^2}\Big)=2(N-1)
-\ \Rightarrow\ \mathrm{Var}(s^2)=\frac{2\sigma^4}{N-1}\xrightarrow{\,N\to1\,}\infty .
+\ \Rightarrow\ \mathrm{Var}(s^2)=\frac{2\sigma^4}{N-1}\to\infty\quad\text{as }N\to1 .
 ```
 
 For the $`1/N`$-normalized estimate of Eq. (2), $`\mathrm{Var}(\hat\sigma^2)=\frac{2\sigma^4(N-1)}{N^2}`$, which is also unreliable at small $`N`$ and is biased downward by the factor $`(N-1)/N`$.
@@ -614,7 +614,7 @@ Dividing by $`\sigma^{2,src}_c`$ gives $`D_c`$. **Scale invariance:** for $`x\to
 
 ```math
 \mathrm{KL}\big(\mathcal N_{PM}\,\|\,\mathcal N_{src}\big)=\log\frac{\sigma_{src}}{\sigma_{PM}}+\frac{\sigma_{PM}^2+(\mu_{PM}-\mu_{src})^2}{2\sigma_{src}^2}-\frac12
-\ \xrightarrow{\ \sigma_{PM}\to0\ }\ \infty ,
+\to\infty\quad\text{as }\sigma_{PM}\to0 ,
 ```
 
 and the reverse direction divides by $`\sigma_{PM}^2`$. $`D_c`$ never divides by the target variance, so it stays finite for near-constant target channels.
