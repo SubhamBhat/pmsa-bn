@@ -222,8 +222,8 @@ The decoder mirrors the encoder: as the resolution grows back, $`N_k`$ grows and
 For $`N`$ Gaussian samples the sample mean and variance have
 
 ```math
-\operatorname{Var}(\bar x)=\frac{\sigma^2}{N},\qquad
-\operatorname{Var}(s^2)=\frac{2\sigma^4}{N-1}\ \xrightarrow{\ N\to1\ }\ \infty .
+\mathrm{Var}(\bar x)=\frac{\sigma^2}{N},\qquad
+\mathrm{Var}(s^2)=\frac{2\sigma^4}{N-1}\ \xrightarrow{\ N\to1\ }\ \infty .
 ```
 
 At the bottleneck a small cup has $`N\approx0.6`$, so the variance estimate is undefined, and with $`N\approx 2`$ it is extremely noisy. A variance that is too small blows up the normalized activations ($`y\propto 1/\sqrt{\hat\sigma^2+\epsilon}`$); a variance that is too large flattens them. This affects **class-conditional** statistics. (AdaBN pools all pixels, so it does not have this problem, but it has the confound of Section 1.1 instead. PMSA-BN avoids the confound and needs shrinkage to keep its class statistics stable.)
@@ -460,12 +460,12 @@ This section derives every equation used above, step by step.
 
 ### D1. Law of total variance (Eq. 1)
 
-Let $`X`$ be the activation of one channel at a random position and $`Y\in\{1,\dots,K\}`$ its class, with $`P(Y=k)=\pi_k`$, $`\mathbb E[X\mid Y=k]=\mu_k`$ and $`\operatorname{Var}(X\mid Y=k)=\sigma_k^2`$.
+Let $`X`$ be the activation of one channel at a random position and $`Y\in\{1,\dots,K\}`$ its class, with $`P(Y=k)=\pi_k`$, $`\mathbb E[X\mid Y=k]=\mu_k`$ and $`\mathrm{Var}(X\mid Y=k)=\sigma_k^2`$.
 
 ```math
 \begin{aligned}
 \mu=\mathbb E[X]&=\mathbb E_Y\big[\mathbb E[X\mid Y]\big]=\sum_k\pi_k\,\mu_k ,\\[4pt]
-\sigma^2=\operatorname{Var}(X)&=\mathbb E\big[(X-\mu)^2\big]
+\sigma^2=\mathrm{Var}(X)&=\mathbb E\big[(X-\mu)^2\big]
 =\sum_k\pi_k\,\mathbb E\big[(X-\mu_k+\mu_k-\mu)^2\mid Y=k\big]\\
 &=\sum_k\pi_k\Big(\underbrace{\mathbb E[(X-\mu_k)^2\mid Y=k]}_{\sigma_k^2}
 +2(\mu_k-\mu)\underbrace{\mathbb E[X-\mu_k\mid Y=k]}_{0}+(\mu_k-\mu)^2\Big)\\
@@ -530,11 +530,11 @@ This is exact when the resolution is divisible by the stride, as it is for every
 For $`x_1,\dots,x_N\stackrel{iid}{\sim}\mathcal N(\mu,\sigma^2)`$ and $`s^2=\frac{1}{N-1}\sum_i(x_i-\bar x)^2`$, Cochran's theorem gives $`(N-1)s^2/\sigma^2\sim\chi^2_{N-1}`$, and a $`\chi^2_\nu`$ variable has variance $`2\nu`$:
 
 ```math
-\operatorname{Var}\!\Big(\frac{(N-1)s^2}{\sigma^2}\Big)=2(N-1)
-\ \Rightarrow\ \operatorname{Var}(s^2)=\frac{2\sigma^4}{N-1}\xrightarrow{\,N\to1\,}\infty .
+\mathrm{Var}\!\Big(\frac{(N-1)s^2}{\sigma^2}\Big)=2(N-1)
+\ \Rightarrow\ \mathrm{Var}(s^2)=\frac{2\sigma^4}{N-1}\xrightarrow{\,N\to1\,}\infty .
 ```
 
-For the $`1/N`$-normalized estimate of Eq. (2), $`\operatorname{Var}(\hat\sigma^2)=\frac{2\sigma^4(N-1)}{N^2}`$, which is also unreliable at small $`N`$ and is biased downward by the factor $`(N-1)/N`$.
+For the $`1/N`$-normalized estimate of Eq. (2), $`\mathrm{Var}(\hat\sigma^2)=\frac{2\sigma^4(N-1)}{N^2}`$, which is also unreliable at small $`N`$ and is biased downward by the factor $`(N-1)/N`$.
 
 ### D7. Posterior mean of the class mean (Eq. 3, exact)
 
@@ -596,7 +596,7 @@ Setting the derivative in $`\gamma`$ to zero:
 \ \Rightarrow\ \gamma^\star=\frac{N\delta^2}{N\delta^2+\sigma^2}=\frac{N}{N+\sigma^2/\delta^2}.
 ```
 
-This has exactly the form $`N/(N+\kappa)`$ with $`\kappa^\star=\sigma^2/\delta^2`$. So $`\kappa_\mu`$ is the ratio of within-class variance to the squared source–target gap one expects; $`\kappa_\mu=8`$ corresponds to an expected gap of about $`0.35\sigma`$. Because the MSE is flat near the optimum, a wide range of κ works, which matches the small sensitivity in Section 6. The same argument with $`\operatorname{Var}(s^2)=2\sigma^4/(N-1)`$ gives the variance weight $`\eta_k`$.
+This has exactly the form $`N/(N+\kappa)`$ with $`\kappa^\star=\sigma^2/\delta^2`$. So $`\kappa_\mu`$ is the ratio of within-class variance to the squared source–target gap one expects; $`\kappa_\mu=8`$ corresponds to an expected gap of about $`0.35\sigma`$. Because the MSE is flat near the optimum, a wide range of κ works, which matches the small sensitivity in Section 6. The same argument with $`\mathrm{Var}(s^2)=2\sigma^4/(N-1)`$ gives the variance weight $`\eta_k`$.
 
 ### D10. 2-Wasserstein distance between two Gaussians (Eq. 6)
 
