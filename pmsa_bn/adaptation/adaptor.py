@@ -20,9 +20,8 @@ import numpy as np
 from typing import Optional, Tuple
 
 import sys, os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import config
-from adaptation.pmsa_bn import (
+from pmsa_bn import config
+from pmsa_bn.adaptation.pmsa_bn import (
     PMSABatchNorm2d, set_adapt_mode,
     set_pseudo_mask_all_layers, get_all_diagnostics
 )

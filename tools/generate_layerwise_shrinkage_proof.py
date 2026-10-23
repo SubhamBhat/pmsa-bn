@@ -5,8 +5,8 @@
     1. Spatial dimension downsampling through ResNet-34 BN layers:
        Input (256x256) -> layer1 (64x64) -> layer2 (32x32) -> layer3 (16x16) -> layer4 (8x8)
     2. Effective mask pixel count Nk shrinking quadratically with stride.
-    3. Mathematical proof of why AdaBN explodes at deep layers (Var(s^2) -> inf as Nk -> 1).
-    4. Exact Empirical Bayes shrinkage (Eq. 3 & 4) restoring numerical stability.
+    3. Why raw class-conditional statistics are unstable at deep layers (Var(s^2) -> inf as Nk -> 1).
+    4. Pseudo-count (empirical Bayes) shrinkage (Eqs. 3-4) restoring numerical stability.
 ================================================================================
 """
 
@@ -20,8 +20,8 @@ import torch
 import torch.nn.functional as F
 
 # Paths
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-SAMPLE_DIR = os.path.join(BASE_DIR, "real_sample")
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # repo root
+SAMPLE_DIR = os.path.join(BASE_DIR, "assets", "real_sample")
 IMG_PATH = os.path.join(SAMPLE_DIR, "drishtiGS_001.png")
 CUP_PATH = os.path.join(SAMPLE_DIR, "drishtiGS_001_cupsegSoftmap.png")
 OD_PATH  = os.path.join(SAMPLE_DIR, "drishtiGS_001_ODsegSoftmap.png")
@@ -79,7 +79,7 @@ for i, st in enumerate(STAGES):
     if N_k >= 2.0:
         sample_var = float(np.var(rng.randn(int(max(2, np.round(N_k)))) * 1.0, ddof=1))
     else:
-        # Extreme variance catastrophe for AdaBN at small Nk
+        # Raw (unshrunk) class variance is unstable at small Nk
         sample_var = float(rng.choice([0.0001, 14.8, 48.2]))
 
     # Shrunk variance (Eq. 4)
@@ -131,7 +131,7 @@ ax_curves.set_ylim(-0.05, 1.05)
 ax_curves.grid(True, linestyle=":", alpha=0.6)
 ax_curves.legend(loc="lower right", fontsize=9)
 
-# Row 2 (Right): Estimator Variance Comparison (AdaBN vs PMSA-BN)
+# Row 2 (Right): Estimator Variance Comparison (no shrinkage vs PMSA-BN)
 ax_var = fig.add_subplot(gs[1, 2:])
 stages_x = [s["stage"].split()[0] for s in stage_data]
 adabn_vars = [s["sample_var"] for s in stage_data]
@@ -139,7 +139,7 @@ pmsa_vars  = [s["shrunk_var"] for s in stage_data]
 
 x_pos = np.arange(len(stages_x))
 w = 0.35
-ax_var.bar(x_pos - w/2, adabn_vars, width=w, color="#e74c3c", alpha=0.85, label="Standard AdaBN (Raw Sample Var $s_k^2$)")
+ax_var.bar(x_pos - w/2, adabn_vars, width=w, color="#e74c3c", alpha=0.85, label="No shrinkage, $\\kappa=0$ (raw class var $\\hat\\sigma_k^2$)")
 ax_var.bar(x_pos + w/2, pmsa_vars,  width=w, color="#2ecc71", alpha=0.85, label=r"PMSA-BN (Shrunk Var $\hat{\sigma}_k^2$, Eq. 4)")
 ax_var.axhline(SIGMA_SRC_SQ, color="#2c3e50", linestyle="--", lw=1.5, label=r"Source Prior Variance ($\sigma_{\mathrm{src}}^2 = 1.0$)")
 
@@ -158,20 +158,20 @@ ax_math.axis("off")
 summary_text = (
     "1. Spatial Downsampling Law (Encoder Stages):\n"
     r"   $N_k^{(l)} = \sum_{h,w} m_{k,h,w}^{(l)} \approx \frac{N_k^{(0)}}{S_l^2}$, where stride $S_l \in \{1, 4, 8, 16, 32\}$."
-    "\n   --> For the Optic Cup, effective pixel count shrinks from 786 px (Input) to 0.77 px (layer4, stride 32).\n\n"
-    "2. AdaBN Variance Catastrophe at Deep Layers ($N_k \to 1$):\n"
+    "\n   --> For the Optic Cup, effective pixel count shrinks from 2033 px (input, 3.1% of the image) to 2.0 px (layer4, stride 32).\n\n"
+    "2. Raw class statistics are unstable at deep layers ($N_k \to 1$):\n"
     r"   $\mathrm{Var}(s_{k,c}^2) = \frac{2\sigma^4}{N_k - 1} \to \infty$ as $N_k \to 1$."
     "\n   --> Without shrinkage, single-image sample variance fluctuates wildly (e.g., exploding to >40 or collapsing to 0).\n\n"
-    "3. Empirical Bayes Normal-Inverse-Gamma Shrinkage (Eq. 3 & 4):\n"
+    "3. Pseudo-count (empirical Bayes) shrinkage (Eqs. 3-4):\n"
     r"   $\hat{\mu}_{k,c} = \gamma_\mu \bar{x}_{k,c} + (1 - \gamma_\mu) \mu_{k,c}^{\mathrm{src}}, \quad \hat{\sigma}_{k,c}^2 = \gamma_\sigma s_{k,c}^2 + (1 - \gamma_\sigma) \sigma_{k,c}^{2,\mathrm{src}}$"
     "\n"
     r"   * When $N_k \ll \kappa$ (tiny lesion or deep layer): $\gamma \to 0 \to \hat{\mu}_k \to \mu_k^{\mathrm{src}}, \; \hat{\sigma}_k^2 \to \sigma_k^{2,\mathrm{src}}$ [Guaranteed Non-Degradation & Bounded Variance]"
     "\n"
     r"   * When $N_k \gg \kappa$ (large organ or shallow layer): $\gamma \to 1 \to \hat{\mu}_k \to \bar{x}_k, \; \hat{\sigma}_k^2 \to s_k^2$ [Full Adaptation to Patient]"
     "\n\n"
-    "4. Law of Total Variance Prior-Matching (Eq. 1):\n"
+    "4. Prior matching with the law of total variance (Eq. 5):\n"
     r"   $\sigma_{\mathrm{PM},c}^2 = \sum_k \pi_k^{\mathrm{src}} \hat{\sigma}_{k,c}^2 + \sum_k \pi_k^{\mathrm{src}} (\hat{\mu}_{k,c} - \mu_{\mathrm{PM},c})^2$"
-    " --> Perfectly decouples appearance shift from label proportion shift."
+    " --> Independent of the target class proportions (Proposition 1)."
 )
 
 ax_math.text(0.01, 0.95, summary_text, fontsize=9.5, va="top", ha="left",
@@ -182,7 +182,7 @@ fig.suptitle("Visual & Mathematical Proof: Mask Resolution Shrinkage & Empirical
              fontsize=14, fontweight="bold", y=0.985)
 
 os.makedirs(os.path.join(BASE_DIR, "figures"), exist_ok=True)
-  out_png = os.path.join(BASE_DIR, "figures", "fig_layerwise_shrinkage_proof.png")
+out_png = os.path.join(BASE_DIR, "figures", "fig_layerwise_shrinkage_proof.png")
 out_pdf = os.path.join(BASE_DIR, "figures", "fig_layerwise_shrinkage_proof.pdf")
 plt.savefig(out_png, dpi=300, bbox_inches="tight")
 plt.savefig(out_pdf, bbox_inches="tight")

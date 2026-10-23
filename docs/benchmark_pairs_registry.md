@@ -2,7 +2,7 @@
 
 This registry defines the official benchmark domains, source datasets, target evaluation cohorts, and experimental specifications matching **Table 1** of the PMSA-BN manuscript.
 
-Selecting `DOMAIN` at the top of [`kaggle_unified_benchmark.py`](file:///c:/Users/Subham%20Bhat/Downloads/tds/pmsa_bn_poc/kaggle_unified_benchmark.py) automatically activates all pairs in that domain.
+Selecting `DOMAIN` at the top of [`kaggle_unified_benchmark.py`](../benchmarks/kaggle_unified_benchmark.py) automatically activates all pairs in that domain.
 
 ---
 
@@ -100,7 +100,7 @@ Selecting `DOMAIN` at the top of [`kaggle_unified_benchmark.py`](file:///c:/User
 
 ## 3. How to Use in `kaggle_unified_benchmark.py`
 
-In [`kaggle_unified_benchmark.py`](file:///c:/Users/Subham%20Bhat/Downloads/tds/pmsa_bn_poc/kaggle_unified_benchmark.py), simply set:
+In [`kaggle_unified_benchmark.py`](../benchmarks/kaggle_unified_benchmark.py), simply set:
 
 ```python
 USER_CFG = dict(

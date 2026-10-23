@@ -21,9 +21,8 @@ from tqdm import tqdm
 from typing import Dict, Tuple
 
 import sys
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import config
-from adaptation.pmsa_bn import PMSABatchNorm2d
+from pmsa_bn import config
+from pmsa_bn.adaptation.pmsa_bn import PMSABatchNorm2d
 
 
 # ─────────────────────────────────────────────────────────────────────────

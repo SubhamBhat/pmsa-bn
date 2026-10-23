@@ -19,9 +19,9 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "figures")
-    os.makedirs(OUT_DIR, exist_ok=True)
-ARTIFACT_DIR = r"C:\Users\Subham Bhat\.gemini\antigravity\brain\32a05e37-89f2-4470-b2e2-79911d285c7e"
+OUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "figures")
+os.makedirs(OUT_DIR, exist_ok=True)
+ARTIFACT_DIR = None  # optional extra copy location
 
 # Academic styling
 plt.rcParams.update({
@@ -90,7 +90,7 @@ def generate_all_in_one_multi_dataset_graph():
     ax.plot(bx, d_alpha, marker="^", markersize=5.5, color=C_DERM, linewidth=1.4, linestyle="-.",
             label=r"Dermoscopy: $\alpha$-BN ($\alpha=0.5$)", zorder=4)
     ax.plot(bx, d_ada, marker="s", markersize=5.5, color=C_DERM, linewidth=1.8, linestyle="--",
-            label=r"Dermoscopy: AdaBN (drops $-13.5\%$)", zorder=3)
+            label=r"Dermoscopy: AdaBN (drops $-13.5\\%$)", zorder=3)
 
     # Group 2: Retinal Fundus (REFUGE -> Drishti-GS Cup)
     ax.plot(bx, f_pmsa, marker="o", markersize=6.5, color=C_FUNDUS, linewidth=2.3, linestyle="-",
@@ -111,12 +111,12 @@ def generate_all_in_one_multi_dataset_graph():
     # ──────────────────────────────────────────────────────────────────────────
     # Clean Callouts (Placed strictly in open canvas space)
     # ──────────────────────────────────────────────────────────────────────────
-    ax.annotate("Severe $B=1$ Collapse\n(AdaBN loses up to $-13.5\%$)",
+    ax.annotate("Severe $B=1$ Collapse\n(AdaBN loses up to $-13.5\\%$)",
                 xy=(0, -0.1347), xytext=(0.28, -0.125),
                 fontsize=8.2, color=C_DERM, fontweight="bold",
                 arrowprops=dict(arrowstyle="->", color=C_DERM, lw=1.2, connectionstyle="arc3,rad=-0.12"))
 
-    ax.annotate("Optimal & Flat at $B=1$\n(PMSA-BN: $+10.3\%$ Cup Gain)",
+    ax.annotate("Optimal & Flat at $B=1$\n(PMSA-BN: $+10.3\\%$ Cup Gain)",
                 xy=(0, 0.1025), xytext=(0.28, 0.082),
                 fontsize=8.2, color=C_FUNDUS, fontweight="bold",
                 arrowprops=dict(arrowstyle="->", color=C_FUNDUS, lw=1.2, connectionstyle="arc3,rad=0.12"))
@@ -148,7 +148,7 @@ def generate_all_in_one_multi_dataset_graph():
     fig.savefig(pdf_path, bbox_inches="tight")
     plt.close(fig)
 
-    if os.path.isdir(ARTIFACT_DIR):
+    if ARTIFACT_DIR and os.path.isdir(ARTIFACT_DIR):
         shutil.copy2(png_path, os.path.join(ARTIFACT_DIR, "fig1_batch_size_all_in_one.png"))
 
     print(f"  [+] Saved un-obscured all-in-one Figure: {png_path} and {pdf_path}")
@@ -275,7 +275,7 @@ def generate_3panel_batch_size_fig():
     fig.savefig(pdf_can, bbox_inches="tight")
     plt.close(fig)
 
-    if os.path.isdir(ARTIFACT_DIR):
+    if ARTIFACT_DIR and os.path.isdir(ARTIFACT_DIR):
         shutil.copy2(png_3p, os.path.join(ARTIFACT_DIR, "fig1_batch_size_3panel.png"))
         shutil.copy2(png_can, os.path.join(ARTIFACT_DIR, "fig1_batch_size.png"))
 

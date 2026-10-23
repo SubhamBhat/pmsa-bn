@@ -9,12 +9,14 @@ RUN:
     python collect_stats.py
 """
 
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))  # repo root
 import torch
 import os
-import config
+from pmsa_bn import config
 from train import build_model
-from data.fundus_dataset import get_dataloaders
-from adaptation.source_stats import collect_and_save
+from pmsa_bn.data.fundus_dataset import get_dataloaders
+from pmsa_bn.adaptation.source_stats import collect_and_save
 
 
 def main():

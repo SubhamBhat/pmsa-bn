@@ -8,6 +8,8 @@ RUN:
     python test_adapt.py
 """
 
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))  # repo root
 import os
 import torch
 import torch.nn.functional as F
@@ -15,14 +17,14 @@ import numpy as np
 from tqdm import tqdm
 import copy
 
-import config
+from pmsa_bn import config
 from train import build_model
-from data.fundus_dataset import get_dataloaders
-from adaptation.pmsa_bn import replace_bn_with_pmsa
-from adaptation.source_stats import load_source_stats, inject_source_stats
-from adaptation.adaptor import PMSAAdaptor, AdaBNAdaptor, AlphaBNAdaptor
-from utils.metrics import evaluate_batch, aggregate_results, print_results_table
-from utils.visualization import (
+from pmsa_bn.data.fundus_dataset import get_dataloaders
+from pmsa_bn.adaptation.pmsa_bn import replace_bn_with_pmsa
+from pmsa_bn.adaptation.source_stats import load_source_stats, inject_source_stats
+from pmsa_bn.adaptation.adaptor import PMSAAdaptor, AdaBNAdaptor, AlphaBNAdaptor
+from pmsa_bn.utils.metrics import evaluate_batch, aggregate_results, print_results_table
+from pmsa_bn.utils.visualization import (
     plot_alpha_heatmap, plot_batch_size_curve, plot_cdr_scatter
 )
 

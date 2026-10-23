@@ -1,7 +1,7 @@
 """
 generate_shrinkage_visual_explanation.py
 =========================================
-Generates the publication-grade visual proof of Empirical Bayes Shrinkage (Eq. 3 & 4)
+Generates the visual explanation of pseudo-count shrinkage (Eqs. 3-4)
 using a REAL clinical retinal fundus image from the Drishti-GS dataset.
 
 Fixes all layout collisions, eliminates overlapping text boxes, and presents
@@ -19,15 +19,15 @@ from PIL import Image, ImageFilter
 import scipy.stats as stats
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-REAL_DIR = os.path.join(BASE_DIR, "real_sample")
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # repo root
+REAL_DIR = os.path.join(BASE_DIR, "assets", "real_sample")
 IMG_PATH = os.path.join(REAL_DIR, "drishtiGS_001.png")
 OD_PATH  = os.path.join(REAL_DIR, "drishtiGS_001_ODsegSoftmap.png")
 CUP_PATH = os.path.join(REAL_DIR, "drishtiGS_001_cupsegSoftmap.png")
 
 os.makedirs(os.path.join(BASE_DIR, "figures"), exist_ok=True)
-  OUT_PNG  = os.path.join(BASE_DIR, "figures", "fig_shrinkage_visual_proof.png")
-OUT_PDF  = os.path.join(BASE_DIR, "figures", "fig_shrinkage_visual_pdf.pdf")
+OUT_PNG  = os.path.join(BASE_DIR, "figures", "fig_shrinkage_visual_proof.png")
+OUT_PDF  = os.path.join(BASE_DIR, "figures", "fig_shrinkage_visual_proof.pdf")
 
 # ── Load and Preprocess Real Clinical Image & Masks ────────────────────────────
 assert os.path.exists(IMG_PATH), f"Missing {IMG_PATH}"
@@ -81,7 +81,7 @@ ax_c = fig.add_subplot(gs[1, 0])
 ax_d = fig.add_subplot(gs[1, 1])
 
 # Global Title placed high with massive clean gap to subplots
-fig.suptitle("Empirical Bayes Shrinkage (Eq. 3 & 4): Visual Proof of Numerical Stability at $B=1$\nEvaluated on Real Retinal Fundus (Drishti-GS Test Image drishtiGS_001)",
+fig.suptitle("Pseudo-Count Shrinkage (Eqs. 3-4): Numerical Stability at $B=1$\nEvaluated on Real Retinal Fundus (Drishti-GS Test Image drishtiGS_001)",
              color="white", fontsize=15, fontweight="bold", y=0.965)
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -192,7 +192,7 @@ ax_b.fill_between(x_vals, pdf_shrunk, alpha=0.18, color="#2ed573")
 # Draw Shrinkage Pull Arrow
 ax_b.annotate("", xy=(mu_shrunk + 0.1, 0.42), xytext=(mu_sample - 0.1, 0.65),
               arrowprops=dict(arrowstyle="->", color="#00f2fe", lw=3.0, mutation_scale=20))
-ax_b.text(2.05, 0.85, "Shrinkage Pull (Eq. 3 & 4)\n$\\gamma = 0.067$ (93.3% Prior Weight)\n$\\eta = 0.000$ (100% Prior Variance)",
+ax_b.text(2.05, 0.85, "Shrinkage pull (Eqs. 3-4)\n$\\gamma = 0.067$ (93.3% Prior Weight)\n$\\eta = 0.000$ (100% Prior Variance)",
           color="#00f2fe", fontsize=10, fontweight="bold",
           bbox=dict(boxstyle="round,pad=0.5", facecolor="#0b0e14", edgecolor="#00f2fe", alpha=0.9, lw=1.2))
 
@@ -211,7 +211,7 @@ ax_b.legend(loc="upper left", frameon=True, facecolor="#0b0e14", edgecolor="#374
 # PANEL C: Segmentation WITHOUT Shrinkage (kappa = 0) -> Catastrophic Blowout
 # ══════════════════════════════════════════════════════════════════════════════
 ax_c.set_facecolor("#161a23")
-ax_c.set_title("(C) Test-Time Adaptation WITHOUT Shrinkage ($\\kappa = 0$, Raw AdaBN at $B=1$)",
+ax_c.set_title("(C) Class-conditional adaptation WITHOUT shrinkage ($\\kappa = 0$, $B=1$)",
                color="#ff4757", fontweight="bold", pad=14, loc="left")
 
 # Create simulated false-positive blowout over the real fundus image
@@ -239,7 +239,7 @@ ax_c.imshow(vis_c)
 
 # Clean Bottom Card (placed INSIDE plot at bottom with zero title collision)
 badge_c = (
-    "FATAL NUMERICAL INSTABILITY (Standard AdaBN at B=1):\n"
+    "NUMERICAL INSTABILITY WITHOUT SHRINKAGE (kappa = 0, B=1):\n"
     "• Denominator:  √(σ̂² + ε) = √(0.000035 + 10⁻⁵) = 0.0067\n"
     "• Activation:   y = (x - μ̂) / 0.0067 = +283.13 (FEATURE EXPLOSION!)\n"
     "• Consequence:  Sigmoid/Softmax saturates to 1.0 everywhere\n"
@@ -288,7 +288,7 @@ badge_d = (
     "• Denominator:  √(σ̃² + ε) = √(0.850 + 10⁻⁵) = 0.7761 (PRIOR ANCHORED)\n"
     "• Activation:   y = (x - μ̃) / 0.7761 = +2.54 (STRICTLY NORMALIZED)\n"
     "• Consequence:  Features stay within standard Gaussian range\n"
-    "• Clinical Result: Crisp, Calibrated Contour | Optic Cup Dice = 0.6311 (CLEAN WIN ★)"
+    "• Clinical Result: Crisp, Calibrated Contour | Optic Cup Dice = 0.6311"
 )
 ax_d.text(12, 372, badge_d, color="#ffffff", fontsize=9.2, va="bottom", ha="left",
           bbox=dict(boxstyle="round,pad=0.6", facecolor="#063c22", edgecolor="#10b981", alpha=0.94, lw=1.5))

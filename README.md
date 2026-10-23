@@ -1,1342 +1,709 @@
-# PMSA-BN: Prior-Matched Shift-Adaptive BatchNorm
+# PMSA-BN: Prior-Matched, Shift-Adaptive Batch Normalization
 
-### Formal Mathematical Derivations, Empirical Bayes Shrinkage Proofs, and Multi-Center Clinical Benchmarks
-
+**Training-free, single-image ($`B=1`$) test-time adaptation for medical image segmentation.**
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-
 [![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[![Status](https://img.shields.io/badge/status-in%20preparation%20%2F%20under%20review-orange.svg)](#)
+PMSA-BN adapts the batch-normalization (BN) statistics of a trained segmentation network to each incoming test image, one image at a time, without gradients and without target labels. It separates two things that ordinary BN adaptation mixes up: **how a structure looks** (appearance shift, which should be adapted) and **how much of the image it occupies** (label-proportion shift, which should not).
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+**Key results (17 source→target transfers, 4 imaging modalities, 3 seeds, $`B=1`$):**
 
+- Highest mean score on **all 17 transfers** and every metric, against Source Only, TENT, AdaBN, α-BN, and an **α-BN oracle whose α is tuned on target labels**.
+- **Never falls below the source model**, whereas AdaBN does on 13/17 transfers and TENT on 11/17.
+- **Same picture with a second backbone** (MobileNetV2), and stable across batch sizes 1–16.
+- **About 25 ms per 384×384 image** (two forward passes, no backpropagation), against 284 ms for TENT.
 
-This repository contains the official implementation, complete mathematical proofs, layer-by-layer spatial downsampling analyses, publication benchmarks, and standalone reproducibility scripts for **Prior-Matched Shift-Adaptive BatchNorm (PMSA-BN)** under strictly single-patient test-time adaptation ($B = 1$).
-
-
----
-
-
-## Table of Contents
-
-1. [Executive Summary](#1-executive-summary)
-
-2. [The Three Mechanisms of "Shrinkage" in Convolutional Networks](#2-the-three-mechanisms-of-shrinkage-in-convolutional-networks)
-
-   - [Mechanism 1: Spatial Dimension Downsampling & Quadratic Pixel Decay](#mechanism-1-spatial-dimension-downsampling--quadratic-pixel-decay)
-
-   - [Mechanism 2: Statistical Empirical Bayes Normal-Inverse-Gamma Shrinkage](#mechanism-2-statistical-empirical-bayes-normal-inverse-gamma-shrinkage)
-
-   - [Mechanism 3: Dynamic Range Enlargement via BN Affine Parameters](#mechanism-3-dynamic-range-enlargement-via-bn-affine-parameters)
-
-3. [Visual Proof Gallery](#3-visual-proof-gallery)
-
-   - [Visual Proof 1: Layerwise Mask Shrinkage Through ResNet-34](#visual-proof-1-layerwise-mask-shrinkage-through-resnet-34)
-
-   - [Visual Proof 2: Real Clinical Patient Proof (Fundus Optic Cup)](#visual-proof-2-real-clinical-patient-proof-fundus-optic-cup)
-
-   - [Visual Proof 3: Batch-Size Invariance Across Imaging Modalities](#visual-proof-3-batch-size-invariance-across-imaging-modalities)
-
-4. [Formal Mathematical Derivations for All Paper Equations](#4-formal-mathematical-derivations-for-all-paper-equations)
-
-   - [Derivation 1: Multi-Class Law of Total Variance (Equation 1)](#derivation-1-multi-class-law-of-total-variance-equation-1)
-
-   - [Derivation 2: Label-Proportion Confounding in Standard AdaBN (Equation 2)](#derivation-2-label-proportion-confounding-in-standard-adabn-equation-2)
-
-   - [Derivation 3: Estimator Variance Explosion in AdaBN as $N_k \to 1$](#derivation-3-estimator-variance-explosion-in-adabn-as-n_k-to-1)
-
-   - [Derivation 4: Conjugate Normal-Inverse-Gamma Posterior Updating (Equations 3 & 4)](#derivation-4-conjugate-normal-inverse-gamma-posterior-updating-equations-3--4)
-
-   - [Derivation 5: Scale-Free 2-Wasserstein Distance & Adaptive Blending (Equation 5)](#derivation-5-scale-free-2-wasserstein-distance--adaptive-blending-equation-5)
-
-5. [Step-by-Step Numerical Walkthrough on Real Drishti-GS Patient](#5-step-by-step-numerical-walkthrough-on-real-drishti-gs-patient)
-
-6. [Comprehensive Clinical Results (Detailed Paper Benchmarks)](#6-comprehensive-clinical-results-detailed-paper-benchmarks)
-
-   - [Master Summary Across All Modalities & Cohorts](#master-summary-across-all-modalities--cohorts)
-
-   - [Part I: Retinal Fundus Photography (Optic Disc / Cup, Ophthalmology, $K=3$)](#part-i-retinal-fundus-photography-optic-disc--cup-ophthalmology-k3)
-
-   - [Part II: Gastrointestinal Endoscopy (Colorectal Polyps, Colonoscopy, $K=2$)](#part-ii-gastrointestinal-endoscopy-colorectal-polyps-colonoscopy-k2)
-
-   - [Part III: Chest Radiography (Bilateral Lung Fields, Pulmonology, $K=2$)](#part-iii-chest-radiography-bilateral-lung-fields-pulmonology-k2)
-
-   - [Part IV: Cutaneous Dermoscopy (Skin Lesion Segmentation, Dermatology, $K=2$)](#part-iv-cutaneous-dermoscopy-skin-lesion-segmentation-dermatology-k2)
-
-   - [Part V: Lightweight MobileNetV2 Architecture Benchmarks](#part-v-lightweight-mobilenetv2-architecture-benchmarks)
-
-   - [Part VI: Neuro-Oncology MRI (BraTS 2019 to BraTS 2020 Multi-Class Benchmark)](#part-vi-neuro-oncology-mri-brats-2019-to-brats-2020-multi-class-benchmark)
-
-7. [Ablation & Diagnostic Analysis](#7-ablation--diagnostic-analysis)
-
-8. [Comprehensive FAQ & Advisor Review Clarifications](#8-comprehensive-faq--advisor-review-clarifications)
-
-9. [Quickstart: Reproduce All Proofs & Benchmarks](#9-quickstart-reproduce-all-proofs--benchmarks)
-
+![PMSA-BN architecture](figures/fig_pmsa_bn_architecture.png)
 
 ---
 
+## Contents
 
-## 1. Executive Summary
-
-
-When deep medical image segmentation networks are deployed on individual clinical test scans ($B = 1$ test-time adaptation):
-
-
-1. **Why Standard AdaBN Collapses at $B = 1$:**
-
-   Standard AdaBN calculates sample mean and variance across the single test image. In clinical imaging, pathological lesions (e.g., optic cup, diminutive polyp, melanoma) occupy small fractions (often $< 1.5\%$) of the image grid. As feature maps pass through encoder downsampling stages (e.g., $256 \times 256 \to 8 \times 8$), the target structure is reduced to **fewer than 2 pixels**. The variance of the sample variance estimator is $\mathrm{Var}(s^2) = \frac{2\sigma^4}{N - 1}$,
-
-   which diverges to infinity as $N \to 1$. Consequently, AdaBN's single-slice normalization denominator fluctuates wildly, destroying semantic feature representations and causing severe performance degradation below Source Only across clinical transfers.
-
-
-2. **Why Fixed $\alpha$-BN Cannot Solve This:**
-
-   $\alpha$-BN interpolates between source running statistics and single-image statistics with a constant weight $\alpha$ (e.g., $\alpha = 0.5$). However, the optimal $\alpha^\star$ varies drastically across clinical targets (ranging from $\alpha = 0.1$ on high-noise chest radiography to $\alpha = 0.9$ on high-contrast colonoscopy). Because target ground-truth masks are unavailable at test time, finding $\alpha^\star$ is impossible in real clinical workflows. Furthermore, a static scalar $\alpha$ blends all channels uniformly, corrupting unshifted channels that required no adaptation.
-
-
-3. **How PMSA-BN Guarantees Stability and Highest Accuracy:**
-
-   * **Empirical Bayes Shrinkage (Eq. 3 & 4):** Parameterized by conjugate Normal-Inverse-Gamma pseudo-counts $(\kappa_\mu = 8, \kappa_\sigma = 16)$. When effective foreground pixels $N_k$ are small ($N_k \ll \kappa$), sample statistics smoothly revert to stored source priors ($\mu_{\text{src}}, \sigma_{\text{src}}^2$), preventing variance explosion or division-by-zero. When $N_k \gg \kappa$, statistics fully adapt to the patient.
-
-   * **Law of Total Variance Prior Matching (Eq. 1):** Recombines class statistics using source prevalence proportions $\pi_k^{\text{src}}$, mathematically decoupling genuine scanner appearance shift from confounding lesion size variations.
-
-   * **Scale-Free 2-Wasserstein Shift Distance (Eq. 5):** Adaptively regulates per-channel mixing $\alpha_c \in [\alpha_{\min}, \alpha_{\max}]$, ensuring unshifted channels remain untouched while shifted channels adapt.
-
+1. [Why single-image BN adaptation fails](#1-why-single-image-bn-adaptation-fails)
+2. [Method](#2-method)
+3. [Bayesian shrinkage in depth](#3-bayesian-shrinkage-in-depth)
+4. [Why PMSA-BN beats AdaBN, α-BN and TENT](#4-why-pmsa-bn-beats-adabn-α-bn-and-tent)
+5. [Results](#5-results)
+6. [Ablation, sensitivity and runtime](#6-ablation-sensitivity-and-runtime)
+7. [Mathematical derivations](#7-mathematical-derivations)
+8. [Repository structure](#8-repository-structure)
+9. [Getting started](#9-getting-started)
+10. [License](#10-license)
 
 ---
 
+## 1. Why single-image BN adaptation fails
 
-## 2. The Three Mechanisms of "Shrinkage" in Convolutional Networks
+A BN layer normalizes each channel with a mean and variance. The lightest test-time adaptation (TTA) methods simply re-estimate these statistics on the test data:
 
+| Method | What it does at test time | Problem at $`B=1`$ |
+| :-- | :-- | :-- |
+| **AdaBN** | Replaces the stored source statistics with the statistics of the test image. | Mixes appearance shift with label-proportion shift; replaces every channel. |
+| **α-BN** | Mixes source and test statistics with one global weight α. | The right α differs per target (0.1 to 0.9 in our data) and cannot be set without labels. |
+| **TENT** | Minimizes prediction entropy by gradient steps on the BN affine parameters. | Needs backpropagation (≈11× slower) and is unstable on a single image. |
+| **PMSA-BN** | Class-conditional statistics, recombined with source proportions, mixed per channel. | — |
 
-To eliminate all ambiguity, "shrinkage" in PMSA-BN operates across three distinct geometric and statistical axes:
+### 1.1 The label-proportion confound
 
+For any BN channel, the statistics pooled over an image decompose over its $`K`$ classes by the law of total variance:
 
+```math
+\mu=\sum_{k}\pi_k\,\mu_k,\qquad
+\sigma^2=\underbrace{\sum_{k}\pi_k\,\sigma_k^2}_{\text{within-class}}+\underbrace{\sum_{k}\pi_k\,(\mu_k-\mu)^2}_{\text{between-class}}
+\tag{1}
 ```
 
-┌──────────────────────────────────────────────────────────────────────────────────┐
+where $`\pi_k`$ is the fraction of positions belonging to class $`k`$ and $`(\mu_k,\sigma_k^2)`$ its class-conditional statistics. AdaBN re-estimates the left-hand side, so it reacts to **two different changes**:
 
-│                   THREE DISTINCT MECHANISMS OF "SHRINKAGE"                       │
+1. a change in $`(\mu_k,\sigma_k^2)`$, i.e. a structure **looks** different (genuine appearance shift), and
+2. a change in $`\pi_k`$, i.e. the image simply **contains** more or less of a structure (a larger optic cup, a lesion filling the frame).
 
-├─────────────────────────┬────────────────────────────┬───────────────────────────┤
+The second change is not a domain shift, but AdaBN "corrects" it anyway. In segmentation the background dominates and foreground size varies strongly between patients, so this confound is the rule. With one image per adaptation step ($`B=1`$) it cannot be averaged out.
 
-│ 1. SPATIAL DOWNSAMPLING │ 2. STATISTICAL SHRINKAGE   │ 3. AFFINE ENLARGEMENT     │
+### 1.2 Indiscriminate replacement
 
-│    (Geometric)          │    (Empirical Bayes)       │    (BatchNorm Scaling)    │
+AdaBN overwrites every channel, and α-BN mixes every channel with the same weight, although a shift usually affects only some channels. The best global α of α-BN ranges from **0.1 to 0.9** across our 17 targets, so no single value works everywhere.
 
-├─────────────────────────┼────────────────────────────┼───────────────────────────┤
+---
 
-│ Feature map shrinks:    │ Sample statistics shrunk   │ Standardized features     │
+## 2. Method
 
-│ 256x256 -> 8x8.         │ toward source priors:      │ rescaled by learned γ:    │
+PMSA-BN changes only the normalization statistics. The network weights and the BN affine parameters $`(\gamma^{BN},\beta^{BN})`$ are never updated.
 
-│ Lesion pixel count Nk   │ μ_hat = γ_μ x_bar + (1-γ)μ │ y = γ_BN · z_hat + β_BN   │
+### 2.1 Notation
 
-│ shrinks quadratically.  │ σ_hat² = γ_σ s² + (1-γ)σ²  │ Restores contrast dynamic │
+| Symbol | Meaning |
+| :-- | :-- |
+| $`K`$ | number of classes; they must partition the image (fundus: background, rim = disc − cup, cup) |
+| $`\mu^{src}_c,\ \sigma^{2,src}_c`$ | stored BN running statistics of channel $`c`$ |
+| $`\mu^{src}_k,\ \sigma^{2,src}_k,\ \pi^{src}_k`$ | source class statistics and class proportions (Phase 0) |
+| $`P^{(0)}`$ | class probabilities from pass 1 (source statistics) |
+| $`M_k`$ | confident pseudo-mask of class $`k`$ |
+| $`w_k(i,j)\in[0,1]`$ | fraction of feature position $`(i,j)`$ covered by class $`k`$ at the current layer |
+| $`N_k=\sum_{i,j}w_k(i,j)`$ | effective number of class-$`k`$ positions at the current layer |
 
-│ Optic cup: 786 -> 0.77px│ Prevents Var(s²) -> inf    │ range before activation.  │
+### 2.2 Phase 0: source class statistics (offline, once)
 
-└─────────────────────────┴────────────────────────────┴───────────────────────────┘
+After training, the labelled source training images are passed through the network once, without augmentation. At every BN layer the ground-truth masks are **average-pooled** to the layer resolution, giving soft weights $`w_k(i,j)`$. From these we accumulate the class-conditional mean $`\mu^{src}_k`$, variance $`\sigma^{2,src}_k`$ and proportion $`\pi^{src}_k`$ of every channel. Only these summaries are stored ($`2K`$ numbers per channel and $`K`$ proportions per layer); **no source images are needed at test time**. As a check, $`\sum_k \pi^{src}_k\mu^{src}_k`$ matches the BN running mean up to the small gap caused by training-time augmentation.
 
+### 2.3 Phase 1: adaptation of each test image (two forward passes)
+
+**Pass 1 and confident pseudo-masks.** A forward pass with the source statistics gives $`P^{(0)}`$. Only confident pixels are kept:
+
+```math
+M_k=\{(i,j):\ \arg\max_{k'}P^{(0)}_{k'}=k,\ P^{(0)}_k>\tau_{hi}\},\qquad
+M_{bg}=\{(i,j):\ P^{(0)}_k<\tau_{lo}\ \ \forall k\neq bg\}
 ```
 
+with $`\tau_{hi}=0.9`$ and $`\tau_{lo}=0.1`$. All other pixels are uncertain and excluded. For nested structures the disc mask is $`\{P_{rim}+P_{cup}>\tau_{hi}\}`$, the cup mask is restricted to the disc, and the rim is their difference.
 
-### Mechanism 1: Spatial Dimension Downsampling & Quadratic Pixel Decay
+**Pass 2: class-conditional statistics.** In the second pass every BN layer, in forward order, average-pools $`M_k`$ to its resolution and computes
 
-Through an encoder backbone (e.g., ResNet-34 or MobileNetV2), stride-2 convolutions and pooling progressively downsample spatial resolution while expanding receptive field diameter:
+```math
+\hat\mu_k=\frac{1}{N_k}\sum_{i,j}w_k(i,j)\,x(i,j),\qquad
+\hat\sigma_k^2=\frac{1}{N_k}\sum_{i,j}w_k(i,j)\,\big(x(i,j)-\hat\mu_k\big)^2
+\tag{2}
+```
 
+**Pseudo-count shrinkage** (details in [Section 3](#3-bayesian-shrinkage-in-depth)):
 
-$$
+```math
+\tilde\mu_k=\gamma_k\,\hat\mu_k+(1-\gamma_k)\,\mu^{src}_k,\qquad \gamma_k=\frac{N_k}{N_k+\kappa_\mu}
+\tag{3}
+```
 
+```math
+\tilde\sigma_k^2=\eta_k\,\hat\sigma_k^2+(1-\eta_k)\,\sigma^{2,src}_k,\qquad \eta_k=\frac{(N_k-1)_+}{(N_k-1)_++\kappa_\sigma}
+\tag{4}
+```
+
+**Prior matching.** The classes are recombined as in Eq. (1), but with the **source** proportions:
+
+```math
+\mu_{PM}=\sum_k\pi^{src}_k\,\tilde\mu_k,\qquad
+\sigma^2_{PM}=\sum_k\pi^{src}_k\,\tilde\sigma_k^2+\sum_k\pi^{src}_k\,(\tilde\mu_k-\mu_{PM})^2
+\tag{5}
+```
+
+**Shift-adaptive mixing.** Each channel's shift is measured by the squared 2-Wasserstein distance between $`\mathcal N(\mu_{PM,c},\sigma^2_{PM,c})`$ and $`\mathcal N(\mu^{src}_c,\sigma^{2,src}_c)`$, normalized by the source variance, and mapped to a mixing weight:
+
+```math
+D_c=\frac{(\mu_{PM,c}-\mu^{src}_c)^2+(\sigma_{PM,c}-\sigma^{src}_c)^2}{\sigma^{2,src}_c+\epsilon},\qquad
+\alpha_c=1-e^{-D_c/\tau}
+\tag{6}
+```
+
+```math
+\hat\mu_c=\alpha_c\,\mu_{PM,c}+(1-\alpha_c)\,\mu^{src}_c,\qquad
+\hat\sigma^2_c=\alpha_c\,\sigma^2_{PM,c}+(1-\alpha_c)\,\sigma^{2,src}_c
+\tag{7}
+```
+
+```math
+y_c=\gamma^{BN}_c\,\frac{x_c-\hat\mu_c}{\sqrt{\hat\sigma^2_c+\epsilon_{BN}}}+\beta^{BN}_c
+\tag{8}
+```
+
+An unshifted channel keeps its source statistics ($`\alpha_c\approx 0`$); a strongly shifted channel adopts the target statistics ($`\alpha_c\to 1`$). One temperature $`\tau`$ controls the transition and is chosen per **source** domain, without target data. The segmentation is the arg max of pass 2, and all statistics are reset before the next image.
+
+### 2.4 Proposition 1 (label-proportion invariance)
+
+> $`(\mu_{PM},\sigma^2_{PM})`$ does not depend on the target proportions $`\pi^{tgt}`$. If, in addition, the class statistics match the source, it equals the pooled source statistics for **any** $`\pi^{tgt}`$, so $`D_c\approx 0`$ and $`\alpha_c\approx 0`$.
+
+*Proof.* Eq. (5) weights the classes by $`\pi^{src}`$ only. Substituting the source class statistics gives Eq. (1) evaluated on the source, i.e. the pooled source statistics, which equal the BN running statistics up to the Phase-0 estimation error. AdaBN instead uses
+
+```math
+\mu_{AdaBN}=\sum_k\pi^{tgt}_k\,\mu_k,\qquad
+\mu_{AdaBN}-\mu^{src}=\sum_k\big(\pi^{tgt}_k-\pi^{src}_k\big)\,\mu_k\neq 0
+```
+
+whenever the proportions change and the class means differ, even though no class changed its appearance. $`\blacksquare`$
+
+### 2.5 Properties
+
+| Property | Why it holds |
+| :-- | :-- |
+| No shift, no change | $`D_c\approx0\Rightarrow\alpha_c\approx0`$; on held-out source images Dice changed by < 0.002 (mean $`\alpha\approx0.01`$). |
+| Label-proportion invariance | Proposition 1. |
+| Well defined at $`B=1`$ for any mask size | Shrinkage (Section 3); an empty class falls back to its source statistics. |
+| Cheap | Two forward passes, no backpropagation, $`O(KC)`$ extra work per BN layer. |
+
+---
+
+## 3. Bayesian shrinkage in depth
+
+Class-conditional statistics solve the label-proportion confound, but they create a new problem: **at deep layers a small structure covers very few feature positions**, so Eq. (2) is estimated from a handful of numbers. This section shows how quickly the mask shrinks, why that makes raw estimates unreliable, and how Eqs. (3)–(4) fix it. Full derivations are in [Section 7](#7-mathematical-derivations) (D5–D9).
+
+### 3.1 How the mask shrinks through the encoder and grows back in the decoder
+
+Each BN layer sees the mask at its own resolution $`H_l\times W_l`$. Average pooling keeps the covered *fraction*, so the effective count is
+
+```math
+N^{(l)}_k=\sum_{i=1}^{H_l}\sum_{j=1}^{W_l}w^{(l)}_k(i,j)\ \approx\ \pi_k\,H_l\,W_l=\frac{N^{(0)}_k}{S_l^2},
+```
+
+where $`S_l`$ is the cumulative stride. The count falls **quadratically** with the stride. The ResNet-34 U-Net used in the paper has 46 BN layers (36 in the encoder, 10 in the decoder). For a 384×384 input:
+
+**Real Drishti-GS patient** (`assets/real_sample/drishtiGS_001`, cup = 3.1 % of the image, rim = 1.6 %; glaucomatous, large cup):
+
+| Part | Stage | Resolution | BN layers | $`N_{rim}`$ | $`N_{cup}`$ | $`\gamma_{cup}`$ (mean) | $`\eta_{cup}`$ (variance) | Weight on source prior |
+| :-- | :-- | :-: | :-: | --: | --: | :-: | :-: | :-: |
+| Encoder | conv1 / bn1 | 192×192 | 1 | 597.2 | 1142.8 | 0.99 | 0.99 | 1 % |
+| Encoder | layer1 | 96×96 | 6 | 149.3 | 285.7 | 0.97 | 0.95 | 3 % |
+| Encoder | layer2 | 48×48 | 9 | 37.3 | 71.4 | 0.90 | 0.81 | 10 % |
+| Encoder | layer3 | 24×24 | 13 | 9.3 | 17.9 | 0.69 | 0.51 | 31 % |
+| Encoder | layer4 (bottleneck) | 12×12 | 7 | 2.3 | 4.5 | 0.36 | 0.18 | 64 % |
+| Decoder | block 1 | 24×24 | 2 | 9.3 | 17.9 | 0.69 | 0.51 | 31 % |
+| Decoder | block 2 | 48×48 | 2 | 37.3 | 71.4 | 0.90 | 0.81 | 10 % |
+| Decoder | block 3 | 96×96 | 2 | 149.3 | 285.7 | 0.97 | 0.95 | 3 % |
+| Decoder | block 4 | 192×192 | 2 | 597.2 | 1142.8 | 0.99 | 0.99 | 1 % |
+| Decoder | block 5 | 384×384 | 2 | 2388.8 | 4571.1 | 1.00 | 1.00 | 0 % |
+
+**Small optic cup** (cup = 0.4 % of the image, typical of a healthy eye):
+
+| Stage | Resolution | $`N_{cup}`$ | $`\gamma_{cup}`$ | $`\eta_{cup}`$ | Weight on source prior |
+| :-- | :-: | --: | :-: | :-: | :-: |
+| conv1 / bn1 (and decoder block 4) | 192×192 | 147.5 | 0.95 | 0.90 | 5 % |
+| layer1 (and decoder block 3) | 96×96 | 36.9 | 0.82 | 0.69 | 18 % |
+| layer2 (and decoder block 2) | 48×48 | 9.2 | 0.54 | 0.34 | 46 % |
+| layer3 (and decoder block 1) | 24×24 | 2.3 | 0.22 | 0.08 | 78 % |
+| layer4 (bottleneck) | 12×12 | 0.58 | 0.07 | 0.00 | 93 % |
+
+The decoder mirrors the encoder: as the resolution grows back, $`N_k`$ grows and the estimates rely on the target again. **Shrinkage is therefore automatic and layer-specific**: shallow layers and the last decoder layers adapt almost fully, while the bottleneck relies mostly on the source prior. There is nothing to tune per layer.
+
+![Layer-wise mask shrinkage](figures/fig_layerwise_shrinkage_proof.png)
+
+*Top: the real patient image and cup mask at each ResNet-34 stage (256×256 input for display). Bottom left: $`\gamma_\mu`$ and $`\gamma_\sigma`$ as functions of $`N_k`$, with each stage's operating point. Bottom right: the class variance at each stage without shrinkage ($`\kappa=0`$) and with PMSA-BN.*
+
+### 3.2 Why raw class statistics fail at small $`N_k`$
+
+For $`N`$ Gaussian samples the sample mean and variance have
+
+```math
+\operatorname{Var}(\bar x)=\frac{\sigma^2}{N},\qquad
+\operatorname{Var}(s^2)=\frac{2\sigma^4}{N-1}\ \xrightarrow{\ N\to1\ }\ \infty .
+```
+
+At the bottleneck a small cup has $`N\approx0.6`$, so the variance estimate is undefined, and with $`N\approx 2`$ it is extremely noisy. A variance that is too small blows up the normalized activations ($`y\propto 1/\sqrt{\hat\sigma^2+\epsilon}`$); a variance that is too large flattens them. This affects **class-conditional** statistics. (AdaBN pools all pixels, so it does not have this problem, but it has the confound of Section 1.1 instead. PMSA-BN avoids the confound and needs shrinkage to keep its class statistics stable.)
+
+### 3.3 The shrinkage estimator and its Bayesian derivation
+
+Eqs. (3)–(4) mix the target estimate with the stored source class statistics. The weights have a simple meaning: $`\kappa_\mu=8`$ and $`\kappa_\sigma=16`$ are **pseudo-counts**, i.e. how many target feature positions the source estimate is worth.
+
+**Mean (exact).** Model the class activations as $`x_i\sim\mathcal N(\mu,\sigma^2)`$ with a conjugate prior on the mean centred on the source, $`\mu\mid\sigma^2\sim\mathcal N(\mu^{src}_k,\ \sigma^2/\kappa_\mu)`$. The posterior mean is
+
+```math
+\mathbb E[\mu\mid x_{1:N}]=\frac{\kappa_\mu\,\mu^{src}_k+N\,\bar x}{\kappa_\mu+N}
+=\underbrace{\frac{N}{N+\kappa_\mu}}_{\gamma_k}\bar x+\Big(1-\frac{N}{N+\kappa_\mu}\Big)\mu^{src}_k ,
+```
+
+which is exactly Eq. (3) with $`\bar x=\hat\mu_k`$.
+
+**Variance (pseudo-count approximation).** With an inverse-gamma prior on $`\sigma^2`$ that carries $`\kappa_\sigma`$ prior degrees of freedom centred on $`\sigma^{2,src}_k`$, the posterior combines $`\kappa_\sigma`$ "prior" degrees of freedom with the $`N-1`$ degrees of freedom of the sample:
+
+```math
+\tilde\sigma_k^2=\frac{(N-1)_+\,\hat\sigma_k^2+\kappa_\sigma\,\sigma^{2,src}_k}{(N-1)_++\kappa_\sigma}
+=\eta_k\,\hat\sigma_k^2+(1-\eta_k)\,\sigma^{2,src}_k .
+```
+
+This is Eq. (4). It is the standard pseudo-count form; the exact posterior mean adds a small term for the mean difference and has $`-2`$ in the denominator, which we omit for simplicity and stability. The $`(N-1)_+`$ makes the weight zero whenever fewer than two positions are available.
+
+**Limits.**
+
+```math
+N_k\gg\kappa:\quad \gamma_k,\eta_k\to1,\quad \tilde\mu_k\to\hat\mu_k,\ \tilde\sigma^2_k\to\hat\sigma^2_k\qquad(\text{pure target})
+```
+
+```math
+N_k\to0:\quad \gamma_k,\eta_k\to0,\quad \tilde\mu_k\to\mu^{src}_k,\ \tilde\sigma^2_k\to\sigma^{2,src}_k\qquad(\text{source prior})
+```
+
+An absent class ($`N_k=0`$) gets $`\gamma_k=\eta_k=0`$, so the undefined estimates of Eq. (2) are never used. A wrong or empty pseudo-mask can only pull a class **back toward its source statistics**, never to an arbitrary value.
+
+### 3.4 Bias–variance trade-off in numbers
+
+Shrinkage adds a little bias (when the target class really differs from the source) but removes a lot of variance. For a class with $`\sigma^2=1`$ whose true target mean is 0.5 away from the source mean, and whose true variance differs by 0.5:
+
+```math
+\mathrm{MSE}(\tilde\mu_k)=\gamma_k^2\frac{\sigma^2}{N}+(1-\gamma_k)^2\delta_\mu^2,\qquad
+\mathrm{MSE}(\tilde\sigma^2_k)=\eta_k^2\frac{2\sigma^4}{N-1}+(1-\eta_k)^2\delta_\sigma^2
+```
+
+| $`N_k`$ | $`\gamma_k`$ | MSE of mean, raw | MSE of mean, shrunk | $`\eta_k`$ | MSE of variance, raw | MSE of variance, shrunk |
+| --: | :-: | :-: | :-: | :-: | :-: | :-: |
+| 4.5 | 0.36 | 0.222 | **0.131** | 0.18 | 0.571 | **0.187** |
+| 17.9 | 0.69 | 0.056 | **0.051** | 0.51 | 0.118 | **0.090** |
+| 71.4 | 0.90 | 0.014 | 0.014 | 0.81 | 0.028 | 0.027 |
+| 285.7 | 0.97 | 0.004 | 0.003 | 0.95 | 0.007 | 0.007 |
+
+At deep layers the error drops by a factor of 2–3; at shallow layers shrinkage is effectively switched off and costs nothing. (These values treat feature positions as independent, which overstates $`N_k`$; real feature maps are correlated, so the benefit at deep layers is, if anything, larger.)
+
+### 3.5 Worked example on the real patient
+
+`tools/proof_shrinkage_numerical_stability.py` reproduces this trace. At the bottleneck a small cup covers two positions with activations `[1.82, 1.83]`:
+
+| Quantity | Without shrinkage ($`\kappa=0`$) | PMSA-BN ($`\kappa_\mu=8,\ \kappa_\sigma=16`$) |
+| :-- | :-: | :-: |
+| Class variance used | 0.000025 (collapsed) | ≈ 0.85 (anchored to the source prior) |
+| Normalization denominator $`\sqrt{\hat\sigma^2+\epsilon}`$ | 0.0059 | ≈ 0.92 |
+| Normalized activation | **+283** (outside any normal range) | ≈ +2.5 (normal range) |
+
+![Shrinkage visual explanation](figures/fig_shrinkage_visual_proof.png)
+
+*(A) The 12×12 bottleneck grid on the real Drishti-GS image: the cup covers less than one feature position. (B) The raw estimate (a spike) versus the shrunk estimate in activation space. (C)–(D) The same patient adapted without and with shrinkage: optic-cup Dice 0.094 versus 0.631.*
+
+### 3.6 Experimental evidence
+
+The ablation in [Section 6](#6-ablation-sensitivity-and-runtime) confirms the analysis: shrinkage adds **+0.058** Dice on the tiny optic cup and **+0.041** on diminutive ETIS polyps, but at most **+0.006** on large skin lesions, where $`N_k\gg\kappa`$ and the weights are already close to 1.
+
+---
+
+## 4. Why PMSA-BN beats AdaBN, α-BN and TENT
+
+**At $`B=1`$:**
+
+- **AdaBN** treats every change in foreground size as a domain shift (Section 1.1) and replaces all channels. It falls below the source model on **13/17** transfers, e.g. 62.4 → 37.7 polyp Dice on ETIS-Larib.
+- **α-BN** with a fixed $`\alpha=0.5`$ still falls below the source model on **7/17**. Its best α ranges from 0.1 to 0.9 across targets, so it cannot be chosen without labels. PMSA-BN beats even the oracle that picks α *with* target labels.
+- **TENT** optimizes the entropy of a single image, which can sharpen wrong predictions. It falls below the source model on **11/17** transfers and costs about 11× more time.
+- **PMSA-BN** never falls below the source model: prior matching removes the confound, shrinkage keeps small classes stable, and per-channel mixing leaves unshifted channels untouched.
+
+**At larger batches (robustness):** pooling more images averages the label-proportion confound but does not remove it, so AdaBN improves with batch size but stays below the source model. PMSA-BN computes its statistics per image, so it does not depend on the batch size.
+
+PH² → ISIC 2018, $`n=600`$, Dice (single seed):
+
+| Batch size $`B`$ | Source Only | AdaBN | α-BN (0.5) | **PMSA-BN** |
+| :-: | :-: | :-: | :-: | :-: |
+| 1 | 0.8886 | 0.7539 | 0.8909 | **0.8940** |
+| 2 | 0.8886 | 0.7940 | 0.8896 | **0.8907** |
+| 4 | 0.8886 | 0.8231 | 0.8869 | 0.8884 |
+| 8 | 0.8886 | 0.8466 | 0.8873 | 0.8880 |
+| 16 | 0.8886 | 0.8489 | 0.8886 | **0.8888** |
+
+PMSA-BN is the best adaptation method at every batch size and peaks at $`B=1`$; for $`B\ge4`$ it stays within 0.001 of the source model.
+
+![Batch-size sweep across three modalities](figures/fig1_batch_size_3panel.png)
+
+---
+
+## 5. Results
+
+All results: single-image adaptation ($`B=1`$), mean of three seeds, hyperparameters chosen **without target data** ($`\tau_{hi}/\tau_{lo}=0.9/0.1`$, $`\kappa_\mu/\kappa_\sigma=8/16`$, $`\tau`$ per source domain). PMSA-BN's gain over the best baseline is positive in every seed (mean seed standard deviation 0.04 points).
+
+### 5.1 Main results (ResNet-34 U-Net)
+
+Dice / Jaccard (%) for binary tasks, optic disc / cup Dice (%) for fundus. **α-BN\*** is an oracle: the best of $`\alpha\in\{0.1,0.3,0.5,0.7,0.9\}`$ chosen per target and metric **using target labels**; no other method sees target labels.
+
+| Transfer | n | Source Only | TENT | AdaBN | α-BN (0.5) | α-BN* (oracle) | **PMSA-BN** |
+| :-- | --: | :-: | :-: | :-: | :-: | :-: | :-: |
+| ***Chest X-ray (lung Dice / Jaccard)*** | | | | | | | |
+| Montgomery → Shenzhen | 336 | 94.40 / 89.65 | 93.91 / 88.77 | 93.86 / 88.66 | 94.40 / 89.63 | 94.43 (α=0.3) / 89.69 (α=0.3) | **94.69** / **90.13** |
+| Shenzhen → Montgomery | 138 | 97.29 / 94.78 | 95.85 / 92.51 | 95.87 / 92.48 | 97.08 / 94.43 | 97.34 (α=0.1) / 94.88 (α=0.1) | **97.44** / **95.06** |
+| Montgomery → JSRT | 247 | 96.56 / 93.37 | 95.73 / 91.86 | 95.58 / 91.58 | 96.44 / 93.15 | 96.56 (α=0.1) / 93.37 (α=0.1) | **96.63** / **93.51** |
+| Montgomery → COVID-QU-Ex | 300 | 92.62 / 86.69 | 92.49 / 86.40 | 92.30 / 86.06 | 92.69 / 86.77 | 92.69 (α=0.5) / 86.78 (α=0.3) | **93.60** / **88.26** |
+| ***Colonoscopy (polyp Dice / Jaccard)*** | | | | | | | |
+| Kvasir → CVC-ClinicDB | 612 | 81.28 / 72.84 | 70.41 / 60.82 | 69.92 / 60.12 | 80.28 / 70.81 | 81.79 (α=0.3) / 72.95 (α=0.1) | **83.02** / **73.95** |
+| CVC-ClinicDB → Kvasir | 200 | 81.33 / 73.19 | 80.00 / 72.10 | 79.03 / 70.34 | 83.09 / 75.31 | 83.09 (α=0.5) / 75.31 (α=0.5) | **83.21** / **75.45** |
+| Kvasir → ETIS-Larib | 196 | 62.42 / 53.81 | 38.12 / 30.35 | 37.66 / 29.75 | 60.29 / 50.32 | 64.05 (α=0.3) / 54.45 (α=0.1) | **65.91** / **56.22** |
+| CVC-ClinicDB → ETIS-Larib | 196 | 57.82 / 47.61 | 50.34 / 41.60 | 49.03 / 39.79 | 61.02 / 50.27 | 61.02 (α=0.5) / 50.27 (α=0.5) | **61.49** / **50.90** |
+| ***Dermoscopy (lesion Dice / Jaccard)*** | | | | | | | |
+| ISIC 2018 → PH² | 200 | 90.70 / 83.65 | 85.95 / 76.65 | 85.63 / 76.16 | 89.04 / 81.20 | 90.59 (α=0.1) / 83.47 (α=0.1) | **90.75** / **83.71** |
+| ISIC 2018 → HAM10000 | 500 | 89.88 / 83.11 | 80.07 / 68.86 | 79.34 / 67.90 | 89.20 / 82.19 | 90.15 (α=0.1) / 83.46 (α=0.1) | **90.45** / **84.31** |
+| ISIC 2018 → Derm7pt † | 500 | 43.01 / 34.32 | 43.23 / 33.06 | 43.10 / 32.86 | 42.42 / 33.45 | 42.88 (α=0.1) / 34.10 (α=0.1) | **44.28** / **34.50** |
+| PH² → ISIC 2018 | 600 | 87.53 / 81.10 | 78.19 / 69.55 | 78.66 / 70.08 | 87.66 / 80.87 | 87.84 (α=0.3) / 81.30 (α=0.1) | **87.96** / **81.56** |
+| ***Fundus (optic disc / optic cup Dice)*** | | | | | | | |
+| REFUGE → ORIGA | 325 | 87.63 / 79.38 | 88.15 / 81.90 | 87.48 / 80.59 | 88.75 / 80.96 | 88.75 (α=0.5) / 81.08 (α=0.7) | **89.20** / **82.48** |
+| REFUGE → Drishti-GS | 50 | 95.63 / 78.61 | 95.64 / 74.92 | 95.55 / 75.53 | 96.08 / 78.30 | 96.08 (α=0.5) / 78.62 (α=0.1) | **96.51** / **81.04** |
+| REFUGE → RIM-ONE r3 | 159 | 45.13 / 34.22 | 54.62 / 40.94 | 53.89 / 41.00 | 55.14 / 42.73 | 58.23 (α=0.7) / 44.77 (α=0.7) | **60.77** / **44.94** |
+| REFUGE → G1020 | 200 | 73.09 / 61.57 | 81.40 / 59.25 | 79.67 / 58.26 | 76.67 / 60.68 | 80.15 (α=0.9) / 61.58 (α=0.1) | **81.94** / **61.73** |
+| REFUGE → PAPILA | 99 | 54.59 / 45.69 | 88.32 / 61.61 | 88.06 / 60.95 | 72.89 / 56.29 | 86.54 (α=0.9) / 60.85 (α=0.9) | **88.69** / **61.73** |
+
+† Derm7pt reference contours are generated automatically; treat it as a supplementary check.
+
+**Statistical significance** (paired $`t`$-test and Wilcoxon signed-rank test on per-image Dice): PMSA-BN is significantly better ($`p<0.01`$) than the **strongest** baseline, often the label-tuned α-BN\*, on 9 of 17 transfers ($`p`$ down to $`10^{-22}`$) and at $`p<0.05`$ on two more. It is significantly better than AdaBN on 15 of 17.
+
+Target sets are full datasets, official test splits (ORIGA Set B, Drishti-GS, Kvasir) or fixed deterministic subsets of large cohorts; full-cohort results differ by less than 0.007.
+
+### 5.2 Second backbone (MobileNetV2 U-Net)
+
+| Transfer | n | Source Only | AdaBN | α-BN (0.5) | **PMSA-BN** |
+| :-- | --: | :-: | :-: | :-: | :-: |
+| REFUGE → Drishti-GS (disc / cup) | 50 | 89.50 / 52.86 | 88.68 / 58.06 | 89.98 / 54.97 | **91.31 / 63.11** |
+| REFUGE → RIM-ONE r3 (disc / cup) | 159 | 43.30 / 32.57 | 65.17 / 38.72 | 48.80 / 33.58 | **75.17 / 52.62** |
+| REFUGE → PAPILA (disc / cup) | 99 | 61.84 / 28.52 | 76.23 / 52.38 | 67.66 / 40.89 | **82.69 / 56.50** |
+| REFUGE → G1020 (disc / cup) | 200 | 63.08 / 44.56 | 79.46 / 51.33 | 73.10 / 52.96 | **81.12 / 54.32** |
+| REFUGE → ORIGA (disc / cup) | 325 | 86.07 / 73.68 | 89.14 / 76.61 | 88.93 / 77.45 | **89.63 / 78.09** |
+| CVC-ClinicDB → Kvasir | 200 | 74.12 | 73.41 | 74.91 | **75.24** |
+| CVC-ClinicDB → ETIS-Larib | 196 | 41.20 | 34.21 | 42.05 | **47.03** |
+| Kvasir → CVC-ClinicDB | 612 | 41.50 | 21.14 | 38.20 | **42.83** |
+| Kvasir → ETIS-Larib | 196 | 24.10 | 9.84 | 22.30 | **26.47** |
+| Montgomery → Shenzhen | 336 | 94.10 | 93.88 | 94.12 | **94.36** |
+| Montgomery → JSRT | 247 | 96.60 | 95.72 | 96.55 | **96.77** |
+| Montgomery → COVID-QU-Ex | 300 | 91.80 | 91.95 | 92.10 | **93.17** |
+| Shenzhen → Montgomery | 138 | 96.70 | 95.42 | 96.60 | **96.88** |
+| ISIC 2018 → HAM10000 | 500 | 87.90 | 74.12 | 87.80 | **88.27** |
+| ISIC 2018 → Derm7pt | 500 | 46.10 | 46.45 | 46.20 | **47.61** |
+| ISIC 2018 → PH² | 200 | 91.40 | 87.10 | 91.10 | **91.65** |
+| PH² → ISIC 2018 | 600 | 83.20 | 69.86 | 83.10 | **84.56** |
+
+Against the best of *all* baselines (including TENT and α-BN\*), PMSA-BN is again highest on all 17 transfers and both metrics; the largest margins are on RIM-ONE (+8.6 / +11.8 disc / cup), PAPILA (+6.5 / +4.1) and CVC-ClinicDB → ETIS (+5.0).
+
+### 5.3 Additional experiments (not in the paper)
+
+**Reverse fundus transfer, ORIGA → REFUGE** ($`n=400`$, ResNet-34, disc / cup Dice %):
+
+| Source Only | AdaBN | α-BN (0.5) | **PMSA-BN** |
+| :-: | :-: | :-: | :-: |
+| 88.12 / 71.45 | 89.05 / 73.21 | 90.15 / 74.90 | **92.34 / 79.15** |
+
+**Brain tumour MRI with $`K=4`$ classes, BraTS 2019 → BraTS 2020** (2D slices, $`B=1`$; WT = whole tumour, TC = tumour core, ET = enhancing tumour; Dice %):
+
+| Backbone | Method | WT | TC | ET | Mean |
+| :-- | :-- | :-: | :-: | :-: | :-: |
+| ResNet-34 | Source Only | **79.40** | **76.66** | 72.73 | 76.26 |
+| ResNet-34 | TENT | 41.50 | 36.78 | 29.89 | 36.06 |
+| ResNet-34 | AdaBN | 41.62 | 36.84 | 28.95 | 35.80 |
+| ResNet-34 | α-BN (0.5) | 52.92 | 49.66 | 55.50 | 52.69 |
+| ResNet-34 | α-BN\* (oracle, α = 0.1) | 77.46 | 73.76 | 70.39 | 73.87 |
+| ResNet-34 | **PMSA-BN** | 77.90 | 75.18 | **75.89** | **76.32** |
+| MobileNetV2 | Source Only | 75.98 | 72.42 | 70.14 | 72.84 |
+| MobileNetV2 | TENT | 43.72 | 39.46 | 30.56 | 37.92 |
+| MobileNetV2 | AdaBN | 43.69 | 39.50 | 27.80 | 37.00 |
+| MobileNetV2 | α-BN (0.5) | 57.85 | 54.24 | 61.35 | 57.81 |
+| MobileNetV2 | α-BN\* (oracle, α = 0.1) | 74.52 | 71.14 | **73.76** | 73.14 |
+| MobileNetV2 | **PMSA-BN** | **76.82** | **73.31** | 73.27 | **74.47** |
+
+With four classes and tumour sub-regions below 1 % of the image, AdaBN and TENT lose about 40 Dice points. PMSA-BN has the highest mean Dice with both backbones and the best enhancing-tumour Dice with ResNet-34; with ResNet-34, Source Only remains higher on WT and TC. Note that BraTS 2020 shares many cases with BraTS 2019, so this benchmark measures robustness to the multi-class setting more than to a strong domain shift.
+
+---
+
+## 6. Ablation, sensitivity and runtime
+
+**Ablation** (Dice, single seed; each row adds one component):
+
+| Configuration | PH² → ISIC | CVC-ClinicDB → Kvasir | Drishti-GS cup (MobileNetV2) |
+| :-- | :-: | :-: | :-: |
+| Source Only | .861 | .839 | .529 |
+| AdaBN | .758 | .820 | .581 |
+| + class-conditional statistics, target proportions | .687 | .789 | .094 |
+| + prior matching (Eq. 5) | .763 | .812 | .561 |
+| + shrinkage (Eqs. 3–4) | .765 | .818 | .619 |
+| + per-channel α (full PMSA-BN, Eqs. 6–8) | **.864** | **.841** | **.627** |
+
+Class-conditional statistics with **target** proportions are worse than AdaBN on all three transfers (the cup collapses to .094), which confirms the label-proportion confound; prior matching recovers it. Shrinkage matters for tiny structures, and per-channel mixing gives the final gain. Using ground-truth masks instead of pseudo-masks improves Dice by only 0.006, and running pass 1 with AdaBN statistics lowers it by 0.007.
+
+**Hyperparameter sensitivity** (all 27 combinations of $`\kappa_\mu\in\{4,8,16\}`$, $`\kappa_\sigma\in\{8,16,32\}`$, $`\tau_{hi}\in\{0.8,0.9,0.95\}`$; MobileNetV2):
+
+| Target | Default setting | Grid minimum | Grid maximum | Range |
+| :-- | :-: | :-: | :-: | :-: |
+| Drishti-GS cup | 0.6311 | 0.6278 | 0.6356 | 0.0078 |
+| ETIS-Larib polyp | 0.2647 | 0.2623 | 0.2685 | 0.0062 |
+| ISIC 2018 lesion | 0.8456 | 0.8423 | 0.8492 | 0.0069 |
+
+Dice varies by at most 0.008 over the whole grid.
+
+**Runtime** (one 384×384 image, $`B=1`$, NVIDIA RTX 3050 laptop GPU):
+
+| Method | Forward passes | Backward passes | ResNet-34 | MobileNetV2 |
+| :-- | :-: | :-: | :-: | :-: |
+| Source Only | 1 | 0 | 12.5 ms | 13.4 ms |
+| AdaBN | 1 | 0 | 16.1 ms | 15.8 ms |
+| **PMSA-BN** | 2 | 0 | **25.1 ms** | **24.6 ms** |
+| TENT (10 steps) | 10 | 10 | 284.0 ms | 400.8 ms |
+
+---
+
+## 7. Mathematical derivations
+
+This section derives every equation used above, step by step.
+
+### D1. Law of total variance (Eq. 1)
+
+Let $`X`$ be the activation of one channel at a random position and $`Y\in\{1,\dots,K\}`$ its class, with $`P(Y=k)=\pi_k`$, $`\mathbb E[X\mid Y=k]=\mu_k`$ and $`\operatorname{Var}(X\mid Y=k)=\sigma_k^2`$.
+
+```math
 \begin{aligned}
-\text{Input } X^{(0)} &\in \mathbb{R}^{3 \times 256 \times 256} && (\text{Receptive Field: } 1 \times 1) \\
-&\;\;\Big\downarrow \text{Conv1 + BN1 (stride 2)} \\
-\text{Stage 0} &\in \mathbb{R}^{64 \times 128 \times 128} && (\text{Receptive Field: } 7 \times 7) \\
-&\;\;\Big\downarrow \text{MaxPool (stride 2)} \\
-\text{layer1 (BN 1–3)} &\in \mathbb{R}^{64 \times 64 \times 64} && (\text{Receptive Field: } 35 \times 35) \\
-&\;\;\Big\downarrow \text{Downsample Block (stride 2)} \\
-\text{layer2 (BN 4–7)} &\in \mathbb{R}^{128 \times 32 \times 32} && (\text{Receptive Field: } 91 \times 91) \\
-&\;\;\Big\downarrow \text{Downsample Block (stride 2)} \\
-\text{layer3 (BN 8–13)} &\in \mathbb{R}^{256 \times 16 \times 16} && (\text{Receptive Field: } 203 \times 203) \\
-&\;\;\Big\downarrow \text{Downsample Block (stride 2)} \\
-\text{layer4 (BN 14–16)} &\in \mathbb{R}^{512 \times 8 \times 8} && (\text{Receptive Field: } 427 \times 427, \text{Global})
+\mu=\mathbb E[X]&=\mathbb E_Y\big[\mathbb E[X\mid Y]\big]=\sum_k\pi_k\,\mu_k ,\\[4pt]
+\sigma^2=\operatorname{Var}(X)&=\mathbb E\big[(X-\mu)^2\big]
+=\sum_k\pi_k\,\mathbb E\big[(X-\mu_k+\mu_k-\mu)^2\mid Y=k\big]\\
+&=\sum_k\pi_k\Big(\underbrace{\mathbb E[(X-\mu_k)^2\mid Y=k]}_{\sigma_k^2}
++2(\mu_k-\mu)\underbrace{\mathbb E[X-\mu_k\mid Y=k]}_{0}+(\mu_k-\mu)^2\Big)\\
+&=\sum_k\pi_k\,\sigma_k^2+\sum_k\pi_k\,(\mu_k-\mu)^2 .
 \end{aligned}
-
-$$
-
-
-#### How the Segmentation Mask Shrinks Across Layers
-
-At any intermediate BN layer $l$ with spatial shape $(H_l, W_l)$, the pseudo-mask $M \in \{0, 1\}^{K \times H \times W}$ is projected using **Adaptive Average Pooling**:
-
-
-$$
-
-m_k^{(l)} = \mathrm{AdaptiveAvgPool2D}(M_k, (H_l, W_l)) \in [0, 1]^{H_l \times W_l}
-
-$$
-
-
-The effective foreground pixel count $N_k^{(l)}$ for class $k$ decays **quadratically** with the cumulative downsampling stride $S_l = H / H_l$:
-
-
-$$
-
-N_k^{(l)} = \sum_{h=1}^{H_l} \sum_{w=1}^{W_l} m_{k, h, w}^{(l)} \approx \frac{N_k^{(0)}}{S_l^2}
-
-$$
-
-
-**Measured Pixel Counts on Real Patient Image (Drishti-GS Fundus, $256 \times 256$):**
-
-
-| Network Stage | Resolution ($H_l \times W_l$) | Spatial Stride $S_l$ | Optic Disc ($N_{\text{disc}}$) | Optic Cup ($N_{\text{cup}}$) | Cup Fraction of Grid |
-
-| :--- | :---: | :---: | :---: | :---: | :---: |
-
-| **Input Image** | $256 \times 256$ | $1\times$ | $3,812.0$ px | $786.0$ px | $1.20\%$ |
-
-| **`layer1`** | $64 \times 64$ | $4\times$ | $238.2$ px | $49.1$ px | $1.20\%$ |
-
-| **`layer2`** | $32 \times 32$ | $8\times$ | $59.6$ px | $12.3$ px | $1.20\%$ |
-
-| **`layer3`** | $16 \times 16$ | $16\times$ | $14.9$ px | **$3.07$ px** | $1.20\%$ |
-
-| **`layer4`** | $8 \times 8$ | $32\times$ | $3.72$ px | **$0.77$ px ($< 1$ px!)** | $1.20\%$ |
-
-
----
-
-
-### Mechanism 2: Statistical Empirical Bayes Normal-Inverse-Gamma Shrinkage
-
-
-Statistical shrinkage regularizes noisy single-patient empirical sample statistics $(\overline{x}_{k,c},\; s_{k,c}^{2})$ toward the stored source prior $(\mu_{k,c}^{\mathrm{src}},\; \sigma_{k,c}^{2,\mathrm{src}})$:
-
-
-$$
-
-\hat{\mu}_{k, c} = \gamma_\mu(N_k) \bar{x}_{k, c} + (1 - \gamma_\mu(N_k)) \mu_{k, c}^{\text{src}}
-
-$$
-
-
-$$
-
-\hat{\sigma}_{k, c}^2 = \gamma_\sigma(N_k) s_{k, c}^2 + (1 - \gamma_\sigma(N_k)) \sigma_{k, c}^{2, \text{src}}
-
-$$
-
-
-where:
-
-
-$$
-
-\gamma_\mu(N_k) = \frac{N_k}{N_k + \kappa_\mu}, \qquad \gamma_\sigma(N_k) = \frac{\max(0, N_k - 1)}{\max(0, N_k - 1) + \kappa_\sigma}
-
-$$
-
-
-* **Asymptotics for Large Lesions ($N_k \gg \kappa$):** $\gamma_\mu \to 1,\; \gamma_\sigma \to 1 \implies \hat{\mu} \to \overline{x},\; \hat{\sigma}^2 \to s^2$ (Adapts fully to the patient).
-
-* **Asymptotics for Tiny Structures ($N_k \to 0$ or $1$):** $\gamma_\mu \to 0,\; \gamma_\sigma \to 0 \implies \hat{\mu} \to \mu^{\mathrm{src}},\; \hat{\sigma}^2 \to \sigma^{2,\mathrm{src}}$ (Guaranteed stable anchor).
-
-
----
-
-
-### Mechanism 3: Dynamic Range Enlargement via BN Affine Parameters
-
-
-After normalization, features are centered with unit variance. The layer applies learned affine parameters:
-
-
-$$
-
-\hat{z}_{c, h, w} = \frac{x_{c, h, w} - \hat{\mu}_c}{\sqrt{\hat{\sigma}_c^2 + \epsilon}}
-
-$$
-
-
-$$
-
-y_{c, h, w} = \gamma_{\text{BN}, c} \cdot \hat{z}_{c, h, w} + \beta_{\text{BN}, c}
-
-$$
-
-
-* **Standardization** compresses arbitrary domain contrast differences into a zero-mean, unit-variance canonical space.
-
-* **Affine Weight $\gamma_{\text{BN}}$** re-expands and enlarges discriminative contrast along semantic feature directions before passing into non-linear activations ($\mathrm{ReLU}$).
-
-
----
-
-
-## 3. Visual Proof Gallery
-
-
-### Visual Proof 1: Layerwise Mask Shrinkage Through ResNet-34
-
-
-![Layerwise Shrinkage Proof](figures/fig_layerwise_shrinkage_proof.png)
-
-
-* **Top Row:** Real patient fundus image and Optic Cup mask downsampled through ResNet-34 stages (`Input` $\to$ `layer1` $\to$ `layer2` $\to$ `layer3` $\to$ `layer4`). Notice how at `layer4` ($8 \times 8$), the entire optic cup is represented by only $0.77$ effective pixels.
-
-* **Middle Left:** Shrinkage weights $\gamma_\mu$ and $\gamma_\sigma$ as a function of $N_k$. Markers indicate exact operating points for each network stage.
-
-* **Middle Right:** Variance stability across layers. Standard AdaBN exhibits catastrophic variance spikes ($> 40$) or near-zero collapse at deep layers, whereas PMSA-BN remains bounded and smooth.
-
-
----
-
-
-### Visual Proof 2: Real Clinical Patient Proof (Fundus Optic Cup)
-
-
-![Visual Proof Fundus](figures/fig_shrinkage_visual_proof.png)
-
-
-This verification utilizes real patient data from the Drishti-GS test set (`drishtiGS_001.png`):
-
-1. **Source Training Domain:** REFUGE ($n = 400$, standard optic disc/cup priors).
-
-2. **Target Test Patient:** Drishti-GS ($n = 1$, strictly $B = 1$).
-
-3. **Observation:** With AdaBN, optic cup activations collapse because cup pixels are outvoted by background retinal tissue. PMSA-BN isolates class-conditional statistics, applies EB shrinkage to the $1.2\%$ cup area, and recombines via the Law of Total Variance.
-
-
----
-
-
-### Visual Proof 3: Batch-Size Invariance Across Imaging Modalities
-
-
-![Batch Size Invariance](figures/fig1_batch_size_3panel.png)
-
-
-Across Dermoscopy ($\text{PH}^2 \to \text{ISIC}$), Fundus ($\text{REFUGE} \to \text{Drishti}$), and CXR ($\text{Montgomery} \to \text{Shenzhen}$):
-
-* **AdaBN** experiences sharp drops at $B = 1$ due to sample covariance noise.
-
-* **$\alpha$-BN** improves over AdaBN but is fixed and requires target oracle tuning.
-
-* **PMSA-BN** produces flat, optimal Dice across all batch sizes $B \in \{1, 2, 4, 8, 16\}$, matching or exceeding oracle baselines.
-
-
----
-
-
-## 4. Formal Mathematical Derivations for All Paper Equations
-
-
-### Derivation 1: Multi-Class Law of Total Variance (Equation 1)
-
-
-**Theorem:** For an arbitrary number of mutually exclusive classes $k \in \{1, \dots, K\}$ with prior probabilities $\pi_k$ ($\sum_{k=1}^K \pi_k = 1$), the recombined feature mean $\mu_{\text{PM}}$ and variance $\sigma_{\text{PM}}^2$ satisfy:
-
-
-$$
-
-\mu_{\text{PM}} = \sum_{k=1}^K \pi_k \hat{\mu}_k
-
-$$
-
-
-$$
-
-\sigma_{\text{PM}}^2 = \sum_{k=1}^K \pi_k \hat{\sigma}_k^2 + \sum_{k=1}^K \pi_k (\hat{\mu}_k - \mu_{\text{PM}})^2
-
-$$
-
-
-*Proof:*
-
-Let $X \in \mathbb{R}$ represent feature activations and $Y \in \{1, \dots, K\}$ denote the discrete class assignment with $P(Y = k) = \pi_k$.
-
-
-By the Law of Total Expectation:
-
-
-$$
-
-\mu_{\text{PM}} = \mathbb{E}[X] = \mathbb{E}_Y[\mathbb{E}[X \mid Y]] = \sum_{k=1}^K P(Y = k) \mathbb{E}[X \mid Y = k] = \sum_{k=1}^K \pi_k \hat{\mu}_k
-
-$$
-
-
-By the Law of Total Variance:
-
-
-$$
-
-\mathrm{Var}(X) = \mathbb{E}_Y[\mathrm{Var}(X \mid Y)] + \mathrm{Var}_Y(\mathbb{E}[X \mid Y])
-
-$$
-
-
-**1. Within-Class Variance:**
-
-
-$$
-
-\mathbb{E}_Y[\mathrm{Var}(X \mid Y)] = \sum_{k=1}^K P(Y = k) \mathrm{Var}(X \mid Y = k) = \sum_{k=1}^K \pi_k \hat{\sigma}_k^2
-
-$$
-
-
-**2. Between-Class Variance:**
-
-
-$$
-
-\mathrm{Var}_Y(\mathbb{E}[X \mid Y]) = \mathbb{E}_Y\left[\bigl(\mathbb{E}[X \mid Y] - \mathbb{E}[X]\bigr)^2\right] = \sum_{k=1}^K \pi_k (\hat{\mu}_k - \mu_{\text{PM}})^2
-
-$$
-
-
-Summing both components yields Equation 1. $\blacksquare$
-
-
----
-
-
-### Derivation 2: Label-Proportion Confounding in Standard AdaBN (Equation 2)
-
-
-**Proposition 1 (Label Shift Invariance):** Suppose the conditional feature distributions are identical between source and target domains ($\mathcal{N}(\mu_k, \sigma_k^2)$ is invariant), but the label proportions shift ($\pi_k^{\text{tgt}} \neq \pi_k^{\text{src}}$). Then standard AdaBN produces spurious domain shift.
-
-
-*Proof:*
-
-AdaBN estimates the batch mean across all pixels indiscriminately:
-
-
-$$
-
-\mu_{\text{AdaBN}} = \sum_{k=1}^K \pi_k^{\text{tgt}} \mu_k
-
-$$
-
-
-Comparing against the source running mean $\mu_{\text{src}} = \sum_{k=1}^K \pi_k^{\text{src}} \mu_k$:
-
-
-$$
-
-\mu_{\text{AdaBN}} - \mu_{\text{src}} = \sum_{k=1}^K (\pi_k^{\text{tgt}} - \pi_k^{\text{src}}) \mu_k \neq 0
-
-$$
-
-
-Even though the scanner physics and class appearance distributions $\mathcal{N}(\mu_k, \sigma_k^2)$ did not shift at all, AdaBN shifts the normalization statistics purely due to lesion size changes. PMSA-BN fixes this by recombining with stored source priors $\pi_k^{\text{src}}$, guaranteeing:
-
-
-$$
-
-\mu_{\text{PM}} = \sum_{k=1}^K \pi_k^{\text{src}} \mu_k = \mu_{\text{src}}
-
-$$
-
-
-eliminating the label-shift confound entirely. $\blacksquare$
-
-
----
-
-
-### Derivation 3: Estimator Variance Explosion in AdaBN as $N_k \to 1$
-
-
-Let sample activations $x_1, \dots, x_N$ be independently drawn from $\mathcal{N}(\mu, \sigma^2)$. The sample variance estimator is:
-
-
-$$
-
-s^2 = \frac{1}{N - 1} \sum_{i=1}^N (x_i - \bar{x})^2
-
-$$
-
-
-By Cochran's theorem, $\frac{(N - 1) s^2}{\sigma^2} \sim \chi^2_{N - 1}$. The variance of a chi-square random variable with $k$ degrees of freedom is $2k$. Therefore:
-
-
-$$
-
-\mathrm{Var}\left(\frac{(N - 1) s^2}{\sigma^2}\right) = 2(N - 1) \implies \mathrm{Var}(s^2) = \frac{2\sigma^4}{N - 1}
-
-$$
-
-
-Taking the limit as $N \to 1$:
-
-
-$$
-
-\lim_{N \to 1^+} \mathrm{Var}(s^2) = \lim_{N \to 1^+} \frac{2\sigma^4}{N - 1} = \infty
-
-$$
-
-
-**Conclusion:** At deep layers where $N_k \approx 1$, the variance of the sample variance estimator approaches infinity. Standard AdaBN is mathematically ill-posed at $B = 1$ for small structures.
-
-
----
-
-
-### Derivation 4: Conjugate Normal-Inverse-Gamma Posterior Updating (Equations 3 & 4)
-
-
-Let the prior on class-conditional feature parameters $(\mu, \sigma^2)$ be the conjugate Normal-Inverse-Gamma distribution $\mathrm{NIG}(\mu_0, \kappa_0, \alpha_0, \beta_0)$:
-
-
-$$
-
-\sigma^2 \sim \mathrm{Inv}\text{-}\mathrm{Gamma}(\alpha_0, \beta_0), \qquad \mu \mid \sigma^2 \sim \mathcal{N}\left(\mu_0, \frac{\sigma^2}{\kappa_0}\right)
-
-$$
-
-
-Parameterized with source prior statistics: $\mu_0 = \mu_{\text{src}}$, $\kappa_0 = \kappa_\mu$, $\alpha_0 = \frac{\kappa_\sigma}{2}$, $\beta_0 = \frac{\kappa_\sigma \sigma_{\text{src}}^2}{2}$.
-
-
-Given $N$ target observations with sample mean $\overline{x}$ and sum of squared deviations $SS = \sum (x_i - \overline{x})^2$:
-
-
-$$
-
-\kappa_N = \kappa_0 + N, \qquad \mu_N = \frac{\kappa_0 \mu_0 + N \bar{x}}{\kappa_0 + N} = \left(\frac{N}{N + \kappa_\mu}\right)\bar{x} + \left(\frac{\kappa_\mu}{N + \kappa_\mu}\right)\mu_{\text{src}}
-
-$$
-
-
-This yields the exact posterior mean shrinkage formula:
-
-
-$$
-
-\hat{\mu} = \gamma_\mu \bar{x} + (1 - \gamma_\mu) \mu_{\text{src}}, \quad \text{where } \gamma_\mu = \frac{N}{N + \kappa_\mu}
-
-$$
-
-
-Similarly, the posterior marginal expectation of $\sigma^2$ is:
-
-
-$$
-
-\mathbb{E}[\sigma^2 \mid X] = \frac{\beta_N}{\alpha_N - 1} = \gamma_\sigma s^2 + (1 - \gamma_\sigma) \sigma_{\text{src}}^2, \quad \text{where } \gamma_\sigma = \frac{\max(0, N - 1)}{\max(0, N - 1) + \kappa_\sigma}
-
-$$
-
-
----
-
-
-### Derivation 5: Scale-Free 2-Wasserstein Distance & Adaptive Blending (Equation 5)
-
-
-The 2-Wasserstein distance between two univariate Gaussian feature distributions $\mathcal{N}(\mu_{\mathrm{PM},c},\; \sigma_{\mathrm{PM},c}^2)$ and $\mathcal{N}(\mu_c^{\mathrm{src}},\; \sigma_c^{2,\mathrm{src}})$ is:
-
-
-$$
-
-W_2^2 = (\mu_{\mathrm{PM},c} - \mu_c^{\mathrm{src}})^2 + (\sigma_{\mathrm{PM},c} - \sigma_c^{\mathrm{src}})^2
-
-$$
-
-
-Normalizing by the source feature scale $\sigma_c^{2,\mathrm{src}} + \epsilon$ yields the scale-free shift metric:
-
-
-$$
-
-D_c = \frac{(\mu_{\mathrm{PM},c} - \mu_c^{\mathrm{src}})^2 + (\sigma_{\mathrm{PM},c} - \sigma_c^{\mathrm{src}})^2}{\sigma_c^{2,\mathrm{src}} + \epsilon}
-
-$$
-
-
-The adaptive per-channel interpolation weight $\alpha_c$ is mapped via a Sigmoid-Tanh schedule with temperature $\tau$:
-
-
-$$
-
-\alpha_c = \mathrm{clamp}\left(1.0 - \exp\left(-\frac{D_c}{\tau}\right), \alpha_{\min}, \alpha_{\max}\right)
-
-$$
-
-
-* When $D_c \approx 0$ (channel has zero domain shift): $\alpha_c \to \alpha_{\min} \implies$ relies $90\%$ on source prior, preventing false adaptation.
-
-* When $D_c \gg \tau$ (channel has strong domain shift): $\alpha_c \to \alpha_{\max} \implies$ adapts aggressively to align with target scanner characteristics.
-
-
----
-
-
-## 5. Step-by-Step Numerical Walkthrough on Real Drishti-GS Patient
-
-
-Running [`proof_shrinkage_numerical_stability.py`](proof_shrinkage_numerical_stability.py) executes a step-by-step trace on real patient data:
-
-
-```python
-
-# Real Patient Layer 3 Profile (Optic Cup, Nk = 3.07 pixels)
-
-kappa_mu    = 8.0
-
-kappa_sigma = 16.0
-
-sigma_src   = 1.00
-
-mu_src      = 0.00
-
-
-# 1. Shrinkage weights
-
-gamma_mu = 3.07 / (3.07 + 8.0)                # = 0.277
-
-gamma_va = (3.07 - 1.0) / (2.07 + 16.0)       # = 0.115
-
-
-# 2. Case A: Noisy 3-pixel sample variance s^2 = 14.80 (severe overestimation)
-
-# AdaBN uses s^2 = 14.80 directly -> squashes activations by sqrt(14.80) = 3.85x
-
-# PMSA-BN applies EB shrinkage:
-
-shrunk_var = 0.115 * 14.80 + (1.0 - 0.115) * 1.00  # = 2.58 (Bounded & Stable!)
-
-
-# 3. Case B: 3-pixel sample variance s^2 = 0.01 (near-zero collapse)
-
-# AdaBN causes activation explosion: x / sqrt(0.01) = 10.0x boost
-
-# PMSA-BN applies EB shrinkage:
-
-shrunk_var = 0.115 * 0.01 + (1.0 - 0.115) * 1.00   # = 0.886 (Safe normalization)
-
 ```
 
+The decomposition needs every position to belong to exactly one class, which is why nested structures are split into disjoint classes (background, rim = disc − cup, cup).
+
+### D2. The label-proportion confound of AdaBN, with numbers
+
+AdaBN normalizes with the pooled statistics of the test image, i.e. Eq. (1) evaluated with the **target** proportions $`\pi^{tgt}`$. Even if no class changes its appearance, the pooled statistics move:
+
+```math
+\mu(\pi^{tgt})-\mu(\pi^{src})=\sum_k\big(\pi^{tgt}_k-\pi^{src}_k\big)\,\mu_k .
+```
+
+For two classes (background $`0`$, foreground $`1`$, foreground fraction $`\pi`$):
+
+```math
+\mu(\pi)=\mu_0+\pi(\mu_1-\mu_0),\qquad
+\sigma^2(\pi)=(1-\pi)\sigma_0^2+\pi\sigma_1^2+\pi(1-\pi)(\mu_1-\mu_0)^2 .
+```
+
+Example: $`\mu_0=0,\ \mu_1=3,\ \sigma_0=\sigma_1=1`$. A source image with $`\pi=0.03`$ gives $`\mu=0.09,\ \sigma^2=1.26`$; a target image of the **same appearance** but $`\pi=0.25`$ gives $`\mu=0.75,\ \sigma^2=2.69`$. AdaBN would shift every activation by 0.66 and shrink it by a factor $`\sqrt{2.69/1.26}\approx1.46`$, purely because the lesion is larger.
+
+### D3. Proposition 1 (label-proportion invariance)
+
+Eq. (5) uses only $`\pi^{src}`$, so $`\partial\mu_{PM}/\partial\pi^{tgt}_k=0`$ and $`\partial\sigma^2_{PM}/\partial\pi^{tgt}_k=0`$: the target proportions do not enter at all. If the class statistics are unchanged, $`\tilde\mu_k=\mu^{src}_k`$ and $`\tilde\sigma_k^2=\sigma^{2,src}_k`$, and by D1
+
+```math
+\mu_{PM}=\sum_k\pi^{src}_k\mu^{src}_k=\mu^{src},\qquad
+\sigma^2_{PM}=\sum_k\pi^{src}_k\sigma^{2,src}_k+\sum_k\pi^{src}_k(\mu^{src}_k-\mu^{src})^2=\sigma^{2,src},
+```
+
+up to the Phase-0 estimation error. Then $`D_c=0`$, $`\alpha_c=0`$ and Eq. (8) reduces to the source BN layer exactly.
+
+### D4. Class statistics with soft weights (Eq. 2)
+
+With fractional weights $`w_k(i,j)\in[0,1]`$, $`\hat\mu_k`$ is the weighted least-squares estimate:
+
+```math
+\hat\mu_k=\arg\min_m\sum_{i,j}w_k(i,j)\,\big(x(i,j)-m\big)^2
+\ \Rightarrow\ \sum_{i,j}w_k\,(x-\hat\mu_k)=0
+\ \Rightarrow\ \hat\mu_k=\frac{1}{N_k}\sum_{i,j}w_k\,x ,
+```
+
+and $`\hat\sigma_k^2`$ is the weighted mean squared deviation around it. A feature position that straddles a boundary contributes in proportion to the class area it covers.
+
+### D5. How the effective count shrinks (Section 3.1)
+
+Average pooling with stride $`S`$ replaces each $`S\times S`$ block by its mean, so it divides the sum of the mask by $`S^2`$:
+
+```math
+N^{(l)}_k=\sum_{i,j}w^{(l)}_k(i,j)=\frac{1}{S_l^2}\sum_{u,v}M_k(u,v)=\frac{N^{(0)}_k}{S_l^2}=\pi_k\,H_lW_l .
+```
+
+This is exact when the resolution is divisible by the stride, as it is for every stage of the 384×384 ResNet-34 U-Net.
+
+### D6. Variance of the sample variance
+
+For $`x_1,\dots,x_N\stackrel{iid}{\sim}\mathcal N(\mu,\sigma^2)`$ and $`s^2=\frac{1}{N-1}\sum_i(x_i-\bar x)^2`$, Cochran's theorem gives $`(N-1)s^2/\sigma^2\sim\chi^2_{N-1}`$, and a $`\chi^2_\nu`$ variable has variance $`2\nu`$:
+
+```math
+\operatorname{Var}\!\Big(\frac{(N-1)s^2}{\sigma^2}\Big)=2(N-1)
+\ \Rightarrow\ \operatorname{Var}(s^2)=\frac{2\sigma^4}{N-1}\xrightarrow{\,N\to1\,}\infty .
+```
+
+For the $`1/N`$-normalized estimate of Eq. (2), $`\operatorname{Var}(\hat\sigma^2)=\frac{2\sigma^4(N-1)}{N^2}`$, which is also unreliable at small $`N`$ and is biased downward by the factor $`(N-1)/N`$.
+
+### D7. Posterior mean of the class mean (Eq. 3, exact)
+
+Prior centred on the source, worth $`\kappa_\mu`$ observations: $`\mu\mid\sigma^2\sim\mathcal N(\mu^{src}_k,\sigma^2/\kappa_\mu)`$. Likelihood: $`x_i\mid\mu\sim\mathcal N(\mu,\sigma^2)`$. Collecting the terms in $`\mu`$ in the log posterior and completing the square:
+
+```math
+\begin{aligned}
+-2\sigma^2\log p(\mu\mid x)&=\kappa_\mu(\mu-\mu^{src}_k)^2+\sum_{i=1}^N(x_i-\mu)^2+\text{const}\\
+&=(\kappa_\mu+N)\,\mu^2-2\mu\,(\kappa_\mu\mu^{src}_k+N\bar x)+\text{const}\\
+&=(\kappa_\mu+N)\Big(\mu-\frac{\kappa_\mu\mu^{src}_k+N\bar x}{\kappa_\mu+N}\Big)^2+\text{const}.
+\end{aligned}
+```
+
+So the posterior is Gaussian with mean
+
+```math
+\mathbb E[\mu\mid x]=\frac{\kappa_\mu\mu^{src}_k+N\bar x}{\kappa_\mu+N}
+=\gamma_k\,\bar x+(1-\gamma_k)\,\mu^{src}_k,\qquad \gamma_k=\frac{N}{N+\kappa_\mu},
+```
+
+and variance $`\sigma^2/(N+\kappa_\mu)`$: the source prior acts exactly like $`\kappa_\mu`$ extra observations. With $`\bar x=\hat\mu_k`$ and $`N=N_k`$ this is Eq. (3).
+
+### D8. The class variance (Eq. 4) and its relation to the exact posterior
+
+**Pooled-variance view (Eq. 4).** The source class variance is treated as an estimate carrying $`\kappa_\sigma`$ degrees of freedom; the target estimate carries $`N-1`$. The classical pooled variance weights each estimate by its degrees of freedom:
+
+```math
+\tilde\sigma_k^2=\frac{(N-1)_+\,s^2+\kappa_\sigma\,\sigma^{2,src}_k}{(N-1)_++\kappa_\sigma}
+=\eta_k\,s^2+(1-\eta_k)\,\sigma^{2,src}_k,\qquad
+\eta_k=\frac{(N-1)_+}{(N-1)_++\kappa_\sigma}.
+```
+
+**Exact Normal–inverse-gamma posterior.** With $`\sigma^2\sim\text{Inv-Gamma}(a_0,b_0)`$, $`a_0=\kappa_\sigma/2`$, $`b_0=\kappa_\sigma\sigma^{2,src}_k/2`$ (prior mean of $`\sigma^2`$ close to $`\sigma^{2,src}_k`$) and the mean prior of D7, the posterior parameters are
+
+```math
+a_N=a_0+\tfrac N2,\qquad
+b_N=b_0+\tfrac12(N-1)s^2+\frac{\kappa_\mu N}{2(\kappa_\mu+N)}(\bar x-\mu^{src}_k)^2,
+```
+
+```math
+\mathbb E[\sigma^2\mid x]=\frac{b_N}{a_N-1}
+=\frac{\kappa_\sigma\sigma^{2,src}_k+(N-1)s^2+\frac{\kappa_\mu N}{\kappa_\mu+N}(\bar x-\mu^{src}_k)^2}{\kappa_\sigma+N-2}.
+```
+
+Eq. (4) keeps the two main terms of this expression with the pooled degrees of freedom $`\kappa_\sigma+N-1`$ in the denominator, and drops the mean-difference term. The dropped term only matters when the class mean itself has shifted, and that shift is already handled by Eq. (3). Eq. (4) is therefore the pooled-variance form of the conjugate update: exact as a degrees-of-freedom-weighted average, and approximate as a posterior mean.
+
+### D9. Bias–variance trade-off and the meaning of κ
+
+Let the true target mean differ from the source mean by $`\delta=\mu^{tgt}_k-\mu^{src}_k`$. Since $`\tilde\mu_k-\mu^{tgt}_k=\gamma(\bar x-\mu^{tgt}_k)-(1-\gamma)\delta`$,
+
+```math
+\mathrm{MSE}(\tilde\mu_k)=\gamma^2\frac{\sigma^2}{N}+(1-\gamma)^2\delta^2 .
+```
+
+Setting the derivative in $`\gamma`$ to zero:
+
+```math
+2\gamma\frac{\sigma^2}{N}-2(1-\gamma)\delta^2=0
+\ \Rightarrow\ \gamma^\star=\frac{N\delta^2}{N\delta^2+\sigma^2}=\frac{N}{N+\sigma^2/\delta^2}.
+```
+
+This has exactly the form $`N/(N+\kappa)`$ with $`\kappa^\star=\sigma^2/\delta^2`$. So $`\kappa_\mu`$ is the ratio of within-class variance to the squared source–target gap one expects; $`\kappa_\mu=8`$ corresponds to an expected gap of about $`0.35\sigma`$. Because the MSE is flat near the optimum, a wide range of κ works, which matches the small sensitivity in Section 6. The same argument with $`\operatorname{Var}(s^2)=2\sigma^4/(N-1)`$ gives the variance weight $`\eta_k`$.
+
+### D10. 2-Wasserstein distance between two Gaussians (Eq. 6)
+
+For distributions on the real line, $`W_2^2(P,Q)=\int_0^1\big(F_P^{-1}(u)-F_Q^{-1}(u)\big)^2du`$. For $`\mathcal N(m,s^2)`$ the quantile function is $`m+s\,\Phi^{-1}(u)`$, so
+
+```math
+\begin{aligned}
+W_2^2&=\int_0^1\big[(m_1-m_2)+(s_1-s_2)\Phi^{-1}(u)\big]^2du\\
+&=(m_1-m_2)^2+2(m_1-m_2)(s_1-s_2)\underbrace{\int_0^1\Phi^{-1}(u)\,du}_{=\,\mathbb E[Z]=0}+(s_1-s_2)^2\underbrace{\int_0^1\Phi^{-1}(u)^2\,du}_{=\,\mathbb E[Z^2]=1}\\
+&=(m_1-m_2)^2+(s_1-s_2)^2 .
+\end{aligned}
+```
+
+Dividing by $`\sigma^{2,src}_c`$ gives $`D_c`$. **Scale invariance:** for $`x\to a x`$ all means and standard deviations scale by $`|a|`$, so the numerator and the denominator both scale by $`a^2`$ and $`D_c`$ is unchanged (up to $`\epsilon`$). **Comparison with KL:**
+
+```math
+\mathrm{KL}\big(\mathcal N_{PM}\,\|\,\mathcal N_{src}\big)=\log\frac{\sigma_{src}}{\sigma_{PM}}+\frac{\sigma_{PM}^2+(\mu_{PM}-\mu_{src})^2}{2\sigma_{src}^2}-\frac12
+\ \xrightarrow{\ \sigma_{PM}\to0\ }\ \infty ,
+```
+
+and the reverse direction divides by $`\sigma_{PM}^2`$. $`D_c`$ never divides by the target variance, so it stays finite for near-constant target channels.
+
+### D11. Properties of the mixing weight (Eqs. 6–8)
+
+```math
+\alpha_c(0)=0,\qquad \lim_{D_c\to\infty}\alpha_c=1,\qquad
+\frac{d\alpha_c}{dD_c}=\frac{e^{-D_c/\tau}}{\tau}>0,\qquad
+\alpha_c\approx\frac{D_c}{\tau}\ \text{for}\ D_c\ll\tau .
+```
+
+So $`\alpha_c\in[0,1)`$ grows monotonically with the shift and is linear for small shifts. With $`\alpha_c=0`$, Eqs. (7)–(8) give $`\hat\mu_c=\mu^{src}_c`$ and $`\hat\sigma^2_c=\sigma^{2,src}_c`$, i.e. the original BN layer; with $`\alpha_c\to1`$ the layer uses the prior-matched target statistics. Means and variances are interpolated linearly, as in α-BN; interpolating variances (rather than standard deviations) keeps Eq. (7) in the same units as Eq. (5).
 
 ---
 
+## 8. Repository structure
 
-## 6. Comprehensive Clinical Results (Detailed Paper Benchmarks)
-
-
-All evaluations are conducted under strictly single-patient test-time adaptation ($B = 1$) without target labels, without test-time gradient backpropagation, and with all hyperparameters frozen.
-
-
-### Master Summary Across All Modalities & Cohorts
-
-
-| Modality | Transfer Pair (Source $\to$ Target) | Cohort ($n$) | Primary Evaluation Metric | Source Only | AdaBN ($B=1$) | $\alpha$-BN (0.5) | PMSA-BN (Ours) | Statistical Significance |
-
-| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-
-| **Fundus** | REFUGE $\to$ Drishti-GS | 50 | Disc / Cup Dice (%) | 95.63 / 78.61 | 95.55 / 75.53 | 96.08 / 78.30 | **96.51** / **81.04** ★ | $p = 1.22 \times 10^{-2}$ vs $\alpha$-BN |
-
-| **Fundus** | REFUGE $\to$ ORIGA | 325 | Disc / Cup Dice (%) | 87.63 / 79.38 | 87.48 / 80.59 | 88.75 / 80.96 | **89.20** / **82.48** ★ | $p = 1.02 \times 10^{-35}$ vs $\alpha$-BN |
-
-| **Fundus** | REFUGE $\to$ RIM-ONE r3 | 159 | Disc / Cup Dice (%) | 45.13 / 34.22 | 53.89 / 41.00 | 55.14 / 42.73 | **60.77** / **44.94** ★ | $p = 4.27 \times 10^{-21}$ vs AdaBN |
-
-| **Fundus** | REFUGE $\to$ G1020 | 200 | Disc / Cup Dice (%) | 73.09 / 61.57 | 79.67 / 58.26 | 76.67 / 60.68 | **81.94** / **61.73** ★ | $p = 1.01 \times 10^{-2}$ vs $\alpha$-BN |
-
-| **Fundus** | REFUGE $\to$ PAPILA | 99 | Disc / Cup Dice (%) | 54.59 / 45.69 | 88.06 / 60.95 | 72.89 / 56.29 | **88.69** / **61.73** ★ | $p = 2.54 \times 10^{-3}$ vs $\alpha$-BN |
-
-| **Fundus (Rev)** | ORIGA $\to$ REFUGE | 400 | Disc / Cup Dice (%) | 88.12 / 71.45 | 89.05 / 73.21 | 90.15 / 74.90 | **92.34** / **79.15** ★ | $p = 3.12 \times 10^{-18}$ vs AdaBN |
-
-| **Endoscopy** | Kvasir $\to$ CVC-ClinicDB | 612 | Polyp Dice / Jaccard (%) | 81.28 / 72.84 | 69.92 / 60.12 | 80.28 / 70.81 | **83.02** / **73.95** ★ | $p = 8.60 \times 10^{-54}$ vs AdaBN |
-
-| **Endoscopy** | Kvasir $\to$ ETIS-Larib | 196 | Polyp Dice / Jaccard (%) | 62.42 / 53.81 | 37.66 / 29.75 | 60.29 / 50.32 | **65.91** / **56.22** ★ | $p = 2.28 \times 10^{-20}$ vs AdaBN |
-
-| **Endoscopy** | ClinicDB $\to$ ETIS-Larib | 196 | Polyp Dice / Jaccard (%) | 57.82 / 47.61 | 49.03 / 39.79 | 61.02 / 50.27 | **61.49** / **50.90** ★ | $p = 2.51 \times 10^{-9}$ vs AdaBN |
-
-| **Endoscopy (Rev)** | ClinicDB $\to$ Kvasir-SEG | 200 | Polyp Dice / Jaccard (%) | 81.33 / 73.19 | 79.03 / 70.34 | 83.09 / 75.31 | **83.21** / **75.45** ★ | $p = 1.41 \times 10^{-2}$ vs AdaBN |
-
-| **Radiography** | Montgomery $\to$ Shenzhen | 336 | Lung Dice / Jaccard (%) | 94.40 / 89.65 | 93.86 / 88.66 | 94.40 / 89.63 | **94.69** / **90.13** ★ | $p = 4.36 \times 10^{-38}$ vs AdaBN |
-
-| **Radiography** | Montgomery $\to$ JSRT | 247 | Lung Dice / Jaccard (%) | 96.56 / 93.37 | 95.58 / 91.58 | 96.44 / 93.15 | **96.63** / **93.51** ★ | $p = 8.64 \times 10^{-41}$ vs AdaBN |
-
-| **Radiography** | Montgomery $\to$ COVID-QU-Ex | 300 | Lung Dice / Jaccard (%) | 92.62 / 86.69 | 92.30 / 86.06 | 92.69 / 86.77 | **93.60** / **88.26** ★ | $p = 4.44 \times 10^{-32}$ vs AdaBN |
-
-| **Radiography (Rev)** | Shenzhen $\to$ Montgomery | 138 | Lung Dice / Jaccard (%) | 97.29 / 94.78 | 95.87 / 92.48 | 97.08 / 94.43 | **97.44** / **95.06** ★ | $p = 9.03 \times 10^{-19}$ vs AdaBN |
-
-| **Dermoscopy** | ISIC 2018 $\to$ HAM10000 | 500 | Lesion Dice / Jaccard (%) | 89.88 / 83.11 | 79.34 / 67.90 | 89.20 / 82.19 | **90.45** / **84.31** ★ | $p = 3.43 \times 10^{-68}$ vs AdaBN |
-
-| **Dermoscopy** | ISIC 2018 $\to$ Derm7pt | 500 | Lesion Dice / Jaccard (%) | 43.01 / 34.32 | 43.10 / 32.86 | 42.42 / 33.45 | **44.28** / **34.50** ★ | $p = 1.26 \times 10^{-20}$ vs AdaBN |
-
-| **Dermoscopy** | ISIC 2018 $\to$ PH$^2$ | 200 | Lesion Dice / Jaccard (%) | 90.70 / 83.65 | 85.63 / 76.16 | 89.04 / 81.20 | **90.75** / **83.71** ★ | $p = 1.87 \times 10^{-15}$ vs AdaBN |
-
-| **Dermoscopy (Rev)** | PH$^2$ $\to$ ISIC 2018 | 600 | Lesion Dice / Jaccard (%) | 87.53 / 81.10 | 78.66 / 70.08 | 87.66 / 80.87 | **87.96** / **81.56** ★ | $p = 1.95 \times 10^{-32}$ vs AdaBN |
-
-| **Brain MRI** | BraTS 2019 $\to$ BraTS 2020 | 100 | WT / TC / ET Dice (%) | 79.40 / 76.66 / 72.73 | 41.62 / 36.84 / 28.95 | 52.92 / 49.66 / 55.50 | **77.90** / **75.18** / **75.89** ★ | **76.32%** Mean Dice (vs 76.26% Source, 73.87% Oracle) |
-
+```text
+pmsa-bn/
+├── pmsa_bn/                     # core library
+│   ├── config.py                # paper defaults (thresholds, pseudo-counts, passes)
+│   ├── adaptation/
+│   │   ├── pmsa_bn.py           # PMSABatchNorm2d: Eqs. (2)–(8)
+│   │   ├── source_stats.py      # Phase 0: class-conditional source statistics
+│   │   └── adaptor.py           # two-pass adaptation, AdaBN and α-BN baselines
+│   ├── data/fundus_dataset.py   # REFUGE / Drishti-GS / RIM-ONE loaders
+│   └── utils/                   # metrics and visualization
+├── scripts/                     # train.py, collect_stats.py, test_adapt.py, run_ablation.py
+├── benchmarks/
+│   ├── kaggle_unified_benchmark.py          # all 17 transfers (+ reverse fundus), one Kaggle cell
+│   ├── kaggle_brats_benchmark.py            # BraTS 2019 → 2020, K = 4
+│   ├── benchmark_hyperparameter_sensitivity.py
+│   └── benchmark_runtime.py
+├── tools/                       # figure generation and the shrinkage numerical trace
+├── figures/                     # all figures used in this README
+├── docs/
+│   ├── method/                  # algorithm specification (LaTeX)
+│   ├── results/                 # per-modality result logs
+│   └── benchmark_pairs_registry.md
+├── assets/real_sample/          # Drishti-GS example used in Section 3
+└── archive/legacy_scripts/      # earlier per-modality scripts, kept for reference
+```
 
 ---
 
+## 9. Getting started
 
-### Part I: Retinal Fundus Photography (Optic Disc / Cup, Ophthalmology, $K=3$)
-
-
-* **Source Domain:** REFUGE ($n = 400$ training images; Siemens / Canon fundus cameras).
-
-* **Architecture:** ResNet-34 U-Net ($384 \times 384$, 3 classes: Background, Neuroretinal Rim, Optic Cup).
-
-* **Diagnostic Biomarker:** The vertical Cup-to-Disc Ratio (CDR) is the primary structural biomarker for glaucomatous optic neuropathy.
-
-
-#### Target 1: ORIGA Singapore Malay Eye Study ($n = 325$)
-
-| Method | Disc Dice ($\pm \sigma$) | Cup Dice ($\pm \sigma$) | Status |
-
-| :--- | :---: | :---: | :---: |
-
-| Source Only | $0.8763 \pm 0.094$ | $0.7938 \pm 0.147$ | Unadapted Baseline |
-
-| TENT | $0.8815 \pm 0.055$ | $0.8190 \pm 0.113$ | Optimization Baseline |
-
-| AdaBN ($B=1$) | $0.8748 \pm 0.062$ | $0.8059 \pm 0.125$ | Standard BN |
-
-| $\alpha$-BN ($\alpha=0.1$) | $0.8810 \pm 0.094$ | $0.7976 \pm 0.145$ | Interpolated Baseline |
-
-| $\alpha$-BN ($\alpha=0.3$) | $0.8854 \pm 0.087$ | $0.8028 \pm 0.140$ | Interpolated Baseline |
-
-| $\alpha$-BN ($\alpha=0.5$) | $0.8875 \pm 0.069$ | $0.8096 \pm 0.128$ | Leading Disc Baseline |
-
-| $\alpha$-BN ($\alpha=0.7$) | $0.8841 \pm 0.069$ | $0.8108 \pm 0.126$ | Leading Cup Baseline |
-
-| $\alpha$-BN ($\alpha=0.9$) | $0.8789 \pm 0.062$ | $0.8088 \pm 0.126$ | Interpolated Baseline |
-
-| **PMSA-BN (Ours)** | **$0.8920 \pm 0.061$** ★ | **$0.8248 \pm 0.118$** ★ | **Clean Sweep (Top Disc & Cup)** |
-
-
-*Statistical Significance:* vs AdaBN $p = 2.99 \times 10^{-8}$; vs TENT $p = 1.27 \times 10^{-21}$; vs $\alpha$-BN (0.5) $p = 1.02 \times 10^{-35}$.
-
-
-#### Target 2: Drishti-GS Consensus Cohort ($n = 50$)
-
-| Method | Disc Dice ($\pm \sigma$) | Cup Dice ($\pm \sigma$) | Status |
-
-| :--- | :---: | :---: | :---: |
-
-| Source Only | $0.9563 \pm 0.051$ | $0.7861 \pm 0.097$ | Unadapted Baseline |
-
-| TENT | $0.9564 \pm 0.043$ | $0.7492 \pm 0.084$ | Negative Transfer on Cup |
-
-| AdaBN ($B=1$) | $0.9555 \pm 0.041$ | $0.7553 \pm 0.079$ | Severe Cup Collapse |
-
-| $\alpha$-BN ($\alpha=0.1$) | $0.9577 \pm 0.047$ | $0.7862 \pm 0.094$ | Leading Cup Baseline |
-
-| $\alpha$-BN ($\alpha=0.3$) | $0.9599 \pm 0.041$ | $0.7859 \pm 0.090$ | Interpolated Baseline |
-
-| $\alpha$-BN ($\alpha=0.5$) | $0.9608 \pm 0.036$ | $0.7830 \pm 0.086$ | Leading Disc Baseline |
-
-| $\alpha$-BN ($\alpha=0.7$) | $0.9602 \pm 0.035$ | $0.7773 \pm 0.083$ | Interpolated Baseline |
-
-| $\alpha$-BN ($\alpha=0.9$) | $0.9577 \pm 0.038$ | $0.7658 \pm 0.081$ | Interpolated Baseline |
-
-| **PMSA-BN (Ours)** | **$0.9651 \pm 0.038$** ★ | **$0.8104 \pm 0.080$** ★ | **Clean Sweep (Top Disc & Cup)** |
-
-
-*Statistical Significance:* vs AdaBN $p = 1.52 \times 10^{-1}$; vs $\alpha$-BN (0.5) $p = 1.22 \times 10^{-2}$.
-
-
-#### Target 3: RIM-ONE r3 Stereoscopic Cohort ($n = 159$)
-
-| Method | Disc Dice ($\pm \sigma$) | Cup Dice ($\pm \sigma$) | Status |
-
-| :--- | :---: | :---: | :---: |
-
-| Source Only | $0.4513 \pm 0.371$ | $0.3422 \pm 0.345$ | Severe Distribution Shift |
-
-| TENT | $0.5462 \pm 0.278$ | $0.4094 \pm 0.312$ | Optimization Baseline |
-
-| AdaBN ($B=1$) | $0.5389 \pm 0.271$ | $0.4100 \pm 0.307$ | Standard BN |
-
-| $\alpha$-BN ($\alpha=0.5$) | $0.5514 \pm 0.320$ | $0.4273 \pm 0.336$ | Interpolated Baseline |
-
-| $\alpha$-BN ($\alpha=0.7$) | $0.5823 \pm 0.291$ | $0.4477 \pm 0.324$ | Leading Baseline |
-
-| **PMSA-BN (Ours)** | **$0.6077 \pm 0.272$** ★ | **$0.4494 \pm 0.311$** ★ | **Clean Sweep (+15.6% Disc over Source)** |
-
-
-*Statistical Significance:* vs AdaBN $p = 4.27 \times 10^{-21}$; vs TENT $p = 7.19 \times 10^{-13}$; vs $\alpha$-BN (0.7) $p = 5.05 \times 10^{-5}$.
-
-
-#### Target 4: G1020 Population Cohort ($n = 200$)
-
-| Method | Disc Dice ($\pm \sigma$) | Cup Dice ($\pm \sigma$) | Status |
-
-| :--- | :---: | :---: | :---: |
-
-| Source Only | $0.7309 \pm 0.302$ | $0.6157 \pm 0.336$ | High Cup Baseline |
-
-| TENT | $0.8140 \pm 0.202$ | $0.5925 \pm 0.332$ | Optimization Baseline |
-
-| AdaBN ($B=1$) | $0.7967 \pm 0.205$ | $0.5826 \pm 0.328$ | Degraded Cup Dice |
-
-| $\alpha$-BN ($\alpha=0.5$) | $0.7667 \pm 0.284$ | $0.6068 \pm 0.339$ | Interpolated Baseline |
-
-| $\alpha$-BN ($\alpha=0.9$) | $0.8015 \pm 0.212$ | $0.5900 \pm 0.329$ | Leading Disc Baseline |
-
-| **PMSA-BN (Ours)** | **$0.8194 \pm 0.196$** ★ | **$0.6173 \pm 0.328$** ★ | **Clean Sweep (Top Disc & Cup)** |
-
-
-*Statistical Significance:* vs TENT $p = 8.60 \times 10^{-4}$; vs $\alpha$-BN (0.9) $p = 1.01 \times 10^{-2}$.
-
-
-#### Target 5: PAPILA Spanish Clinical Cohort ($n = 99$)
-
-| Method | Disc Dice ($\pm \sigma$) | Cup Dice ($\pm \sigma$) | Status |
-
-| :--- | :---: | :---: | :---: |
-
-| Source Only | $0.5459 \pm 0.379$ | $0.4569 \pm 0.352$ | Unadapted Baseline |
-
-| TENT | $0.8832 \pm 0.121$ | $0.6161 \pm 0.244$ | Optimization Baseline |
-
-| AdaBN ($B=1$) | $0.8806 \pm 0.128$ | $0.6095 \pm 0.246$ | Adaptive Baseline |
-
-| $\alpha$-BN ($\alpha=0.5$) | $0.7289 \pm 0.323$ | $0.5629 \pm 0.307$ | Under-adapted |
-
-| $\alpha$-BN ($\alpha=0.9$) | $0.8654 \pm 0.158$ | $0.6085 \pm 0.254$ | Leading Baseline |
-
-| **PMSA-BN (Ours)** | **$0.8869 \pm 0.118$** ★ | **$0.6173 \pm 0.246$** ★ | **Clean Sweep (+34.1% Disc over Source)** |
-
-
-*Statistical Significance:* vs AdaBN $p = 1.43 \times 10^{-1}$; vs $\alpha$-BN (0.9) $p = 2.54 \times 10^{-3}$.
-
-
----
-
-
-### Part II: Gastrointestinal Endoscopy (Colorectal Polyps, Colonoscopy, $K=2$)
-
-
-* **Clinical Problem:** Colorectal polyps are precursor lesions for colorectal adenocarcinoma. Standard AdaBN collapses catastrophically on flat, diminutive polyps due to overwhelming mucosal background dominance ($> 98\%$).
-
-* **Architecture:** ResNet-34 U-Net ($352 \times 352$).
-
-
-#### Target 1: CVC-ClinicDB ($n = 612$, Kvasir Source)
-
-| Method | Polyp Dice ($\pm \sigma$) | Polyp Jaccard ($\pm \sigma$) | Margin vs PMSA-BN | Benchmark Status |
-
-| :--- | :---: | :---: | :---: | :---: |
-
-| Source Only | $0.8128 \pm 0.223$ | $0.7284 \pm 0.237$ | $+0.0174$ | Unadapted Baseline |
-
-| TENT | $0.7041 \pm 0.283$ | $0.6082 \pm 0.300$ | $+0.1261$ | Severe Negative Transfer |
-
-| AdaBN ($B=1$) | $0.6992 \pm 0.281$ | $0.6012 \pm 0.299$ | $+0.1310$ | Collapse ($-11.36\%$ below Source) |
-
-| $\alpha$-BN ($\alpha=0.3$) | $0.8179 \pm 0.187$ | $0.7256 \pm 0.217$ | $+0.0123$ | Leading Baseline |
-
-| $\alpha$-BN ($\alpha=0.5$) | $0.8028 \pm 0.199$ | $0.7081 \pm 0.229$ | $+0.0274$ | Below Source Only |
-
-| **PMSA-BN (Ours)** | **$0.8302 \pm 0.175$** ★ | **$0.7395 \pm 0.203$** ★ | — | **Highest Score & Clean Sweep** |
-
-
-*Statistical Significance:* vs AdaBN $t = 14.49, p = 8.60 \times 10^{-54}$; vs TENT $t = 13.92, p = 1.89 \times 10^{-38}$.
-
-
-#### Target 2: ETIS-Larib Polyp DB ($n = 196$, Kvasir Source) [Stress-Test]
-
-| Method | Polyp Dice ($\pm \sigma$) | Polyp Jaccard ($\pm \sigma$) | Margin vs PMSA-BN | Benchmark Status |
-
-| :--- | :---: | :---: | :---: | :---: |
-
-| Source Only | $0.6242 \pm 0.356$ | $0.5381 \pm 0.330$ | $+0.0349$ | Unadapted Baseline |
-
-| TENT | $0.3812 \pm 0.344$ | $0.3035 \pm 0.324$ | $+0.2779$ | Catastrophic Breakdown |
-
-| AdaBN ($B=1$) | $0.3766 \pm 0.339$ | $0.2975 \pm 0.318$ | $+0.2825$ | Severe Collapse ($-24.76\%$ below Source) |
-
-| $\alpha$-BN ($\alpha=0.3$) | $0.6405 \pm 0.327$ | $0.5440 \pm 0.307$ | $+0.0186$ | Leading Baseline |
-
-| $\alpha$-BN ($\alpha=0.5$) | $0.6029 \pm 0.328$ | $0.5032 \pm 0.309$ | $+0.0562$ | Below Source Only |
-
-| **PMSA-BN (Ours)** | **$0.6591 \pm 0.320$** ★ | **$0.5622 \pm 0.301$** ★ | — | **Highest Score & Clean Sweep** |
-
-
-*Statistical Significance:* vs AdaBN $t = 12.34, p = 2.28 \times 10^{-20}$; vs TENT $t = 12.07, p = 2.03 \times 10^{-25}$.
-
-
-#### Target 3: ETIS-Larib Polyp DB ($n = 196$, ClinicDB Source)
-
-| Method | Polyp Dice ($\pm \sigma$) | Polyp Jaccard ($\pm \sigma$) | Margin vs PMSA-BN | Benchmark Status |
-
-| :--- | :---: | :---: | :---: | :---: |
-
-| Source Only | $0.5782 \pm 0.323$ | $0.4761 \pm 0.310$ | $+0.0367$ | Unadapted Baseline |
-
-| TENT | $0.5034 \pm 0.352$ | $0.4160 \pm 0.342$ | $+0.1115$ | Degraded |
-
-| AdaBN ($B=1$) | $0.4903 \pm 0.341$ | $0.3979 \pm 0.327$ | $+0.1246$ | Negative Transfer ($-8.79\%$) |
-
-| $\alpha$-BN ($\alpha=0.5$) | $0.6102 \pm 0.303$ | $0.5027 \pm 0.296$ | $+0.0047$ | Leading Baseline |
-
-| **PMSA-BN (Ours)** | **$0.6149 \pm 0.307$** ★ | **$0.5090 \pm 0.299$** ★ | — | **Highest Score & Clean Sweep** |
-
-
-*Statistical Significance:* vs AdaBN $t = 7.28, p = 2.51 \times 10^{-9}$; vs TENT $t = 6.42, p = 1.03 \times 10^{-9}$.
-
-
-#### Target 4: Kvasir-SEG Reverse Transfer ($n = 200$, ClinicDB Source)
-
-| Method | Polyp Dice ($\pm \sigma$) | Polyp Jaccard ($\pm \sigma$) | Margin vs PMSA-BN | Benchmark Status |
-
-| :--- | :---: | :---: | :---: | :---: |
-
-| Source Only | $0.8133 \pm 0.225$ | $0.7319 \pm 0.251$ | $+0.0188$ | High Baseline |
-
-| TENT | $0.8000 \pm 0.238$ | $0.7210 \pm 0.277$ | $+0.0321$ | Degraded |
-
-| AdaBN ($B=1$) | $0.7903 \pm 0.231$ | $0.7034 \pm 0.266$ | $+0.0418$ | Negative Transfer |
-
-| $\alpha$-BN ($\alpha=0.5$) | $0.8309 \pm 0.209$ | $0.7531 \pm 0.241$ | $+0.0012$ | Leading Baseline |
-
-| **PMSA-BN (Ours)** | **$0.8321 \pm 0.208$** ★ | **$0.7545 \pm 0.240$** ★ | — | **Highest Score & Clean Sweep** |
-
-
----
-
-
-### Part III: Chest Radiography (Bilateral Lung Fields, Pulmonology, $K=2$)
-
-
-* **Clinical Problem:** Cross-national variations in tube voltage (kVp), patient positioning, and acute parenchymal opacities.
-
-* **Architecture:** ResNet-34 U-Net ($256 \times 256$).
-
-
-#### Target 1: Shenzhen No. 3 People's Hospital ($n = 336$, Montgomery Source)
-
-| Method | Lung Dice ($\pm \sigma$) | Lung Jaccard ($\pm \sigma$) | Margin vs PMSA-BN | Benchmark Status |
-
-| :--- | :---: | :---: | :---: | :---: |
-
-| Source Only | $0.9440 \pm 0.041$ | $0.8965 \pm 0.066$ | $+0.0029$ | Unadapted Baseline |
-
-| TENT | $0.9391 \pm 0.040$ | $0.8877 \pm 0.065$ | $+0.0078$ | Degraded |
-
-| AdaBN ($B=1$) | $0.9386 \pm 0.039$ | $0.8866 \pm 0.064$ | $+0.0083$ | Degraded |
-
-| $\alpha$-BN ($\alpha=0.3$) | $0.9443 \pm 0.040$ | $0.8969 \pm 0.064$ | $+0.0026$ | Leading Baseline |
-
-| **PMSA-BN (Ours)** | **$0.9469 \pm 0.037$** ★ | **$0.9013 \pm 0.061$** ★ | — | **Highest Score & Clean Sweep** |
-
-
-*Statistical Significance:* vs AdaBN $t = 12.69, p = 4.36 \times 10^{-38}$; vs $\alpha$-BN (0.3) $t = 6.80, p = 7.08 \times 10^{-25}$.
-
-
-#### Target 2: JSRT Standard Digital Radiography ($n = 247$, Montgomery Source)
-
-| Method | Lung Dice ($\pm \sigma$) | Lung Jaccard ($\pm \sigma$) | Margin vs PMSA-BN | Benchmark Status |
-
-| :--- | :---: | :---: | :---: | :---: |
-
-| Source Only | $0.9656 \pm 0.010$ | $0.9337 \pm 0.018$ | $+0.0007$ | High Baseline |
-
-| TENT | $0.9573 \pm 0.016$ | $0.9186 \pm 0.029$ | $+0.0090$ | Degraded |
-
-| AdaBN ($B=1$) | $0.9558 \pm 0.016$ | $0.9158 \pm 0.028$ | $+0.0105$ | Degraded |
-
-| $\alpha$-BN ($\alpha=0.1$) | $0.9656 \pm 0.010$ | $0.9337 \pm 0.019$ | $+0.0007$ | Leading Baseline |
-
-| **PMSA-BN (Ours)** | **$0.9663 \pm 0.010$** ★ | **$0.9351 \pm 0.019$** ★ | — | **Highest Score & Clean Sweep** |
-
-
-*Statistical Significance:* vs AdaBN $t = 16.37, p = 8.64 \times 10^{-41}$; vs $\alpha$-BN (0.1) $t = 5.08, p = 4.59 \times 10^{-11}$.
-
-
-#### Target 3: COVID-QU-Ex Severe Pathology Shift ($n = 300$, Montgomery Source)
-
-| Method | Lung Dice ($\pm \sigma$) | Lung Jaccard ($\pm \sigma$) | Margin vs PMSA-BN | Benchmark Status |
-
-| :--- | :---: | :---: | :---: | :---: |
-
-| Source Only | $0.9262 \pm 0.054$ | $0.8669 \pm 0.088$ | $+0.0098$ | Unadapted Baseline |
-
-| TENT | $0.9249 \pm 0.050$ | $0.8640 \pm 0.081$ | $+0.0111$ | Degraded |
-
-| AdaBN ($B=1$) | $0.9230 \pm 0.048$ | $0.8606 \pm 0.079$ | $+0.0130$ | Degraded |
-
-| $\alpha$-BN ($\alpha=0.5$) | $0.9269 \pm 0.051$ | $0.8677 \pm 0.083$ | $+0.0091$ | Leading Baseline |
-
-| **PMSA-BN (Ours)** | **$0.9360 \pm 0.043$** ★ | **$0.8826 \pm 0.072$** ★ | — | **Highest Score & Clean Sweep** |
-
-
-*Statistical Significance:* vs AdaBN $t = 10.42, p = 4.44 \times 10^{-32}$; vs $\alpha$-BN (0.5) $t = 10.55, p = 6.84 \times 10^{-49}$.
-
-
-#### Target 4: Reverse Transfer: Shenzhen $\longrightarrow$ Montgomery ($n = 138$)
-
-| Method | Lung Dice ($\pm \sigma$) | Lung Jaccard ($\pm \sigma$) | Margin vs PMSA-BN | Benchmark Status |
-
-| :--- | :---: | :---: | :---: | :---: |
-
-| Source Only | $0.9729 \pm 0.019$ | $0.9478 \pm 0.034$ | $+0.0015$ | High Baseline |
-
-| TENT | $0.9585 \pm 0.057$ | $0.9251 \pm 0.087$ | $+0.0159$ | Negative Transfer |
-
-| AdaBN ($B=1$) | $0.9587 \pm 0.052$ | $0.9248 \pm 0.082$ | $+0.0157$ | Negative Transfer ($-1.42\%$) |
-
-| $\alpha$-BN ($\alpha=0.1$) | $0.9734 \pm 0.019$ | $0.9488 \pm 0.033$ | $+0.0010$ | Leading Baseline |
-
-| **PMSA-BN (Ours)** | **$0.9744 \pm 0.018$** ★ | **$0.9506 \pm 0.032$** ★ | — | **Highest Score & Clean Sweep** |
-
-
----
-
-
-### Part IV: Cutaneous Dermoscopy (Skin Lesion Segmentation, Dermatology, $K=2$)
-
-
-* **Clinical Problem:** Differences in dermatoscopic illumination, dermatoscope optical filters, skin pigmentation, and peripheral lens vignetting.
-
-* **Architecture:** ResNet-34 U-Net ($320 \times 320$).
-
-
-#### Target 1: HAM10000 Multi-Center Cohort ($n = 500$, ISIC 2018 Source)
-
-| Method | Lesion Dice ($\pm \sigma$) | Lesion Jaccard ($\pm \sigma$) | Margin vs PMSA-BN | Benchmark Status |
-
-| :--- | :---: | :---: | :---: | :---: |
-
-| Source Only | $0.8988 \pm 0.113$ | $0.8311 \pm 0.148$ | $+0.0057$ | Unadapted Baseline |
-
-| TENT | $0.8007 \pm 0.153$ | $0.6886 \pm 0.168$ | $+0.1038$ | Severe Degradation |
-
-| AdaBN ($B=1$) | $0.7934 \pm 0.155$ | $0.6790 \pm 0.169$ | $+0.1111$ | Negative Transfer ($-10.5\%$) |
-
-| $\alpha$-BN ($\alpha=0.1$) | $0.9015 \pm 0.108$ | $0.8346 \pm 0.143$ | $+0.0030$ | Leading Baseline |
-
-| **PMSA-BN (Ours)** | **$0.9045 \pm 0.110$** ★ | **$0.8431 \pm 0.144$** ★ | — | **Highest Score & Clean Sweep** |
-
-
-*Statistical Significance:* vs AdaBN $t = 17.75, p = 3.43 \times 10^{-68}$; vs $\alpha$-BN (0.1) $t = -3.95, p = 7.65 \times 10^{-16}$.
-
-
-#### Target 2: Derm7pt Clinical Cross-Modality Cohort ($n = 500$, ISIC 2018 Source)
-
-| Method | Lesion Dice ($\pm \sigma$) | Lesion Jaccard ($\pm \sigma$) | Margin vs PMSA-BN | Benchmark Status |
-
-| :--- | :---: | :---: | :---: | :---: |
-
-| Source Only | $0.4301 \pm 0.356$ | $0.3432 \pm 0.308$ | $+0.0127$ | Baseline |
-
-| TENT | $0.4323 \pm 0.320$ | $0.3306 \pm 0.271$ | $+0.0105$ | Optimization Baseline |
-
-| AdaBN ($B=1$) | $0.4310 \pm 0.318$ | $0.3286 \pm 0.269$ | $+0.0118$ | Standard BN |
-
-| $\alpha$-BN ($\alpha=0.1$) | $0.4288 \pm 0.354$ | $0.3410 \pm 0.306$ | $+0.0140$ | Interpolated Baseline |
-
-| **PMSA-BN (Ours)** | **$0.4428 \pm 0.333$** ★ | **$0.3450 \pm 0.287$** ★ | — | **Highest Score & Clean Sweep** |
-
-
-#### Target 3: PH$^2$ High-Resolution Clinical Cohort ($n = 200$, ISIC 2018 Source)
-
-| Method | Lesion Dice ($\pm \sigma$) | Lesion Jaccard ($\pm \sigma$) | Margin vs PMSA-BN | Benchmark Status |
-
-| :--- | :---: | :---: | :---: | :---: |
-
-| Source Only | $0.9070 \pm 0.070$ | $0.8365 \pm 0.105$ | $+0.0005$ | High Baseline |
-
-| TENT | $0.8595 \pm 0.102$ | $0.7665 \pm 0.144$ | $+0.0480$ | Degraded |
-
-| AdaBN ($B=1$) | $0.8563 \pm 0.102$ | $0.7616 \pm 0.144$ | $+0.0512$ | Negative Transfer ($-5.1\%$) |
-
-| $\alpha$-BN ($\alpha=0.1$) | $0.9059 \pm 0.071$ | $0.8347 \pm 0.105$ | $+0.0016$ | Leading Baseline |
-
-| **PMSA-BN (Ours)** | **$0.9075 \pm 0.069$** ★ | **$0.8371 \pm 0.103$** ★ | — | **Highest Score & Clean Sweep** |
-
-
-#### Target 4: Reverse Dermoscopy: PH$^2 \longrightarrow$ ISIC 2018 ($n = 600$)
-
-| Method | Lesion Dice ($\pm \sigma$) | Lesion Jaccard ($\pm \sigma$) | Margin vs PMSA-BN | Benchmark Status |
-
-| :--- | :---: | :---: | :---: | :---: |
-
-| Source Only | $0.8753 \pm 0.181$ | $0.8110 \pm 0.206$ | $+0.0043$ | Unadapted Baseline |
-
-| TENT | $0.7819 \pm 0.245$ | $0.6955 \pm 0.270$ | $+0.0977$ | Severe Degradation |
-
-| AdaBN ($B=1$) | $0.7866 \pm 0.242$ | $0.7008 \pm 0.266$ | $+0.0930$ | Severe Collapse ($-8.87\%$) |
-
-| $\alpha$-BN ($\alpha=0.3$) | $0.8784 \pm 0.172$ | $0.8130 \pm 0.197$ | $+0.0012$ | Leading Baseline |
-
-| **PMSA-BN (Ours)** | **$0.8796 \pm 0.172$** ★ | **$0.8156 \pm 0.198$** ★ | — | **Highest Score & Clean Sweep** |
-
-
-*Statistical Significance:* vs AdaBN $t = 9.55, p = 1.95 \times 10^{-32}$; vs TENT $t = 9.88, p = 1.98 \times 10^{-21}$.
-
-
----
-
-
-### Part V: Lightweight MobileNetV2 Architecture Benchmarks
-
-
-To demonstrate architectural invariance beyond ResNet-34, PMSA-BN was evaluated using a lightweight **MobileNetV2** encoder (~2.2M parameters, 62 `BatchNorm2d` layers, ~90% parameter reduction).
-
-
-| Modality | Transfer Pair | Target ($n$) | Primary Metric | Source Only | AdaBN ($B=1$) | $\alpha$-BN (0.5) | PMSA-BN (Ours) | Advantage |
-
-| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-
-| **Fundus** | REFUGE $\to$ Drishti-GS | 50 | Disc / Cup (%) | 89.50 / 52.86 | 88.68 / 58.06 | 89.98 / 54.97 | **91.31** / **63.11** ★ | $+5.05\%$ Cup ($p < 10^{-8}$) |
-
-| **Fundus** | REFUGE $\to$ RIM-ONE r3 | 159 | Disc / Cup (%) | 43.30 / 32.57 | 65.17 / 38.72 | 48.80 / 33.58 | **75.17** / **52.62** ★ | $+8.64\%$ Disc / $+11.81\%$ Cup |
-
-| **Fundus** | REFUGE $\to$ PAPILA | 99 | Disc / Cup (%) | 61.84 / 28.52 | 76.23 / 52.38 | 67.66 / 40.89 | **82.69** / **56.50** ★ | $+6.46\%$ Disc / $+4.12\%$ Cup |
-
-| **Fundus** | REFUGE $\to$ G1020 | 200 | Disc / Cup (%) | 63.08 / 44.56 | 79.46 / 51.33 | 73.10 / 52.96 | **81.12** / **54.32** ★ | Double Win over TENT & AdaBN |
-
-| **Fundus** | REFUGE $\to$ ORIGA | 325 | Disc / Cup (%) | 86.07 / 73.68 | 89.14 / 76.61 | 88.93 / 77.45 | **89.63** / **78.09** ★ | Highest Cup Biomarker ($p < 10^{-11}$) |
-
-| **Endoscopy** | ClinicDB $\to$ Kvasir | 200 | Polyp Dice (%) | 74.12 | 73.41 | 74.91 | **75.24** ★ | Clean Sweep |
-
-| **Endoscopy** | ClinicDB $\to$ ETIS | 196 | Polyp Dice (%) | 41.20 | 34.21 | 42.05 | **47.03** ★ | $+4.98\%$ Gain |
-
-| **Endoscopy** | Kvasir $\to$ ClinicDB | 612 | Polyp Dice (%) | 41.50 | 21.14 | 38.20 | **42.83** ★ | $p = 2.92 \times 10^{-12}$ vs AdaBN |
-
-| **Endoscopy** | Kvasir $\to$ ETIS | 196 | Polyp Dice (%) | 24.10 | 09.84 | 22.30 | **26.47** ★ | Prevents Collapse |
-
-| **Radiography**| Montgomery $\to$ Shenzhen| 336 | Lung Dice (%) | 94.10 | 93.88 | 94.12 | **94.36** ★ | Clean Sweep |
-
-| **Radiography**| Montgomery $\to$ JSRT | 247 | Lung Dice (%) | 96.60 | 95.72 | 96.55 | **96.77** ★ | Clean Sweep |
-
-| **Radiography**| Montgomery $\to$ COVID | 300 | Lung Dice (%) | 91.80 | 91.95 | 92.10 | **93.17** ★ | $+1.22\%$ Gain |
-
-| **Radiography**| Shenzhen $\to$ Montgomery| 138 | Lung Dice (%) | 96.70 | 95.42 | 96.60 | **96.88** ★ | Clean Sweep |
-
-| **Dermoscopy** | ISIC18 $\to$ HAM10000 | 500 | Lesion Dice (%) | 87.90 | 74.12 | 87.80 | **88.27** ★ | Clean Sweep |
-
-| **Dermoscopy** | ISIC18 $\to$ Derm7pt | 500 | Lesion Dice (%) | 46.10 | 46.45 | 46.20 | **47.61** ★ | $+1.16\%$ Gain |
-
-| **Dermoscopy** | ISIC18 $\to$ PH2 | 200 | Lesion Dice (%) | 91.40 | 87.10 | 91.10 | **91.65** ★ | Clean Sweep |
-
-| **Dermoscopy** | PH2 $\to$ ISIC18 | 600 | Lesion Dice (%) | 83.20 | 69.86 | 83.10 | **84.56** ★ | $+14.70\%$ vs AdaBN ($p < 10^{-40}$) |
-
-| **Brain MRI** | BraTS 2019 $\to$ BraTS 2020 | 100 | Mean Dice (WT/TC/ET) (%) | 72.84 | 37.00 | 57.81 | **74.47** ★ | $+1.63\%$ vs Source / $+1.33\%$ vs Oracle |
-
-
----
-
-
-### Part VI: Neuro-Oncology MRI (BraTS 2019 to BraTS 2020 Multi-Class Benchmark)
-
-
-* **Source Domain:** BraTS 2019 Training Cohort (Multi-parametric 3D MRI: FLAIR, T1ce, T2; $n = 600$ tumor slices).
-
-* **Target Domain:** BraTS 2020 Unseen Multi-Center Target Cohort ($B = 1$, single-slice test-time adaptation).
-
-* **Target Sub-Compartments ($K = 4$):** Class 0: Background ($98.52\%$ prior), Class 1: Necrotic / Non-enhancing Core (NCR, $0.18\%$), Class 2: Peritumoral Edema (ED, $0.88\%$), Class 3: GD-Enhancing Active Tumor (ET, $0.42\%$).
-
-* **Clinical Evaluation Protocol:** Standard MICCAI BraTS composite structures:
-
-  - **Whole Tumor (WT):** Classes $1 + 2 + 3$ (complete tumor burden).
-
-  - **Tumor Core (TC):** Classes $1 + 3$ (necrotic core + active enhancing tissue).
-
-  - **Enhancing Tumor (ET):** Class $3$ (contrast-enhancing viable neoplastic cells).
-
-
-#### Official Multi-Class Benchmark Results ($B = 1$)
-
-
-##### ResNet-34 Encoder U-Net (46 `BatchNorm2d` Layers)
-
-| Method | Whole Tumor (WT) | Tumor Core (TC) | Enhancing Tumor (ET) | Mean Dice | Status |
-
-| :--- | :---: | :---: | :---: | :---: | :---: |
-
-| Source Only (Frozen) | 79.40% | 76.66% | 72.73% | 76.26% | Unadapted Baseline |
-
-| TENT (Wang et al., 2021) | 41.50% | 36.78% | 29.89% | 36.06% | Optimization Collapse |
-
-| AdaBN ($B = 1$) (Li et al.) | 41.62% | 36.84% | 28.95% | 35.80% | Catastrophic Variance Explosion |
-
-| $\alpha$-BN ($\alpha = 0.5$) | 52.92% | 49.66% | 55.50% | 52.69% | Severe Under-Adaptation |
-
-| $\alpha$-BN (Oracle $\alpha^\star = 0.1$) | 77.46% | 73.76% | 70.39% | 73.87% | Unrealistic Uniform Scalar Ceiling |
-
-| **PMSA-BN (Ours)** | **77.90%** | **75.18%** | **75.89%** | **76.32%** ★ | **[BEST OVERALL]** (+3.16% ET over Source; +2.45% vs Oracle) |
-
-
-##### MobileNetV2 Lightweight Encoder U-Net (62 `BatchNorm2d` Layers, ~2.2M params)
-
-| Method | Whole Tumor (WT) | Tumor Core (TC) | Enhancing Tumor (ET) | Mean Dice | Status |
-
-| :--- | :---: | :---: | :---: | :---: | :---: |
-
-| Source Only (Frozen) | 75.98% | 72.42% | 70.14% | 72.84% | Unadapted Baseline |
-
-| TENT (Wang et al., 2021) | 43.72% | 39.46% | 30.56% | 37.92% | Optimization Collapse |
-
-| AdaBN ($B = 1$) (Li et al.) | 43.69% | 39.50% | 27.80% | 37.00% | Catastrophic Variance Explosion |
-
-| $\alpha$-BN ($\alpha = 0.5$) | 57.85% | 54.24% | 61.35% | 57.81% | Severe Under-Adaptation |
-
-| $\alpha$-BN (Oracle $\alpha^\star = 0.1$) | 74.52% | 71.14% | 73.76% | 73.14% | Unrealistic Uniform Scalar Ceiling |
-
-| **PMSA-BN (Ours)** | **76.82%** ★ | **73.31%** ★ | **73.27%** | **74.47%** ★ | **[BEST OVERALL]** (Clean Sweep +1.63% Mean Dice, +3.13% ET) |
-
-
-#### Clinical Insights & Mechanistic Proofs on Glioblastoma MRI:
-
-1. **Defeating the Label-Informed $\alpha$-BN Oracle:**
-
-   The test-label informed Oracle exhaustively selects the single best scalar across $\alpha \in \{0.1, 0.3, 0.5, 0.7, 0.9\}$. On both backbones, Oracle settles at $\alpha^\star = 0.10$ ($73.87\%$ and $73.14\%$). PMSA-BN outperforms the Oracle on ResNet-34 by **$+2.45\%$** ($76.32\%$ vs $73.87\%$) and MobileNetV2 by **$+1.33\%$** ($74.47\%$ vs $73.14\%$). This empirically confirms that channel-specific Wasserstein adaptation $\alpha_c$ is strictly superior to any uniform scalar across all feature maps.
-
-2. **Superiority in Enhancing Active Tumor (ET):**
-
-   Glioblastoma recurrence is driven by the hypervascular active enhancing rim. On ResNet-34, PMSA-BN achieves **$75.89\%$** on Enhancing Tumor vs **$72.73\%$** Source Only (**$+3.16\%$ clinical margin**). On MobileNetV2, PMSA-BN achieves **$73.27\%$** vs **$70.14\%$** Source Only (**$+3.13\%$ clinical margin**).
-
-3. **Catastrophic Failure of Test-Time Gradient Optimization (TENT) & AdaBN:**
-
-   Standard AdaBN collapses by $> 40\%$ Dice ($35.80\%$ and $37.00\%$) because glioblastoma sub-compartments occupy less than $1\%$ of the spatial grid, causing small-sample variance divergence. TENT similarly suffers gradient instability on test entropy, collapsing to $36.06\%$ and $37.92\%$. PMSA-BN's closed-form Empirical Bayes shrinkage prevents variance collapse entirely.
-
-
----
-
-
-## 7. Ablation & Diagnostic Analysis
-
-
-Ablation on $\text{PH}^2 \to \text{ISIC 2018}$ (single seed 42, $B = 1$, Lesion Dice):
-
-
-| Component Configuration | Lesion Dice | Delta vs Source | Mechanistic Finding |
-
-| :--- | :---: | :---: | :--- |
-
-| **Source Only** | $0.831$ | — | Unadapted baseline. |
-
-| **Standard AdaBN** | $0.680$ | $-15.1\%$ | Severe $B=1$ sample variance explosion. |
-
-| **Class Split with Target Proportions $\pi^{\text{tgt}}$** | $0.666$ | $-16.5\%$ | Confirms class separation alone leaves label-proportion shift unmitigated. |
-
-| **+ Prior-Matched Recombination $\pi^{\text{src}}$ (Eq. 1)** | $0.788$ | $+12.2\%$ | Decouples scanner appearance shift from lesion area confounding. |
-
-| **+ Empirical Bayes Shrinkage (Eq. 3 & 4)** | $0.840$ | $+5.2\%$ | Stabilizes small-sample variance at deep bottleneck layers. |
-
-| **+ Scale-Free 2-Wasserstein Mixing $\alpha_c$ (Eq. 5)** | $0.834$ | — | Prevents unshifted channels from being corrupted by spurious adaptation. |
-
-| **+ Second Pass ($T=2$) Refinement** | **$0.835$** | **$+0.4\%$** | Final prediction convergence. |
-
-
-* **Lesion Size Stratification:** AdaBN's collapse is concentrated on small lesions: on quartile Q1 ($< 7.5\%$ image grid), AdaBN drops to $0.242$ Dice, whereas PMSA-BN preserves $0.775$ Dice.
-
-* **Batch Size Invariance:** AdaBN requires $B \ge 16$ to partially recover ($0.680 \to 0.807$), whereas PMSA-BN is flat across all batch sizes ($0.834$ at $B=1$, $0.832$ at $B=16$).
-
-
----
-
-
-## 8. Comprehensive FAQ & Advisor Review Clarifications
-
-
-#### Q1: "Why does AdaBN collapse below Source Only at $B = 1$?"
-
-**Answer:** Standard AdaBN was designed for classification with large batch sizes ($B = 64$ or $128$). In medical segmentation at $B = 1$, calculating sample variance across a single patient's image introduces high estimation variance ($\mathrm{Var}(s^2) = \frac{2\sigma^4}{N - 1}$). For small structures ($N_k \le 3$), this variance diverges to infinity, corrupting the normalization scale.
-
-
-#### Q2: "Can't we simply set $\alpha = 0.5$ in $\alpha$-BN?"
-
-**Answer:** No. As proven across 17 clinical transfers, the optimal $\alpha^\star$ ranges from $0.1$ to $0.9$. A static scalar $\alpha = 0.5$ under-adapts when domain shift is strong and over-adapts when shift is absent. Crucially, static $\alpha$-BN blends all channels uniformly, corrupting unshifted channels. PMSA-BN automatically determines channel-specific adaptation $\alpha_c$ using the scale-free 2-Wasserstein distance.
-
-
-#### Q3: "What happens if a lesion is completely absent ($N_k = 0$) in a test slice?"
-
-**Answer:** In PMSA-BN, when $N_k = 0$, the shrinkage weights evaluate to $\gamma_\mu(0) = 0$ and $\gamma_\sigma(0) = 0$. The estimates mathematically default to:
-
-
-$$
-
-\hat{\mu}_{k, c} = \mu_{k, c}^{\text{src}}, \qquad \hat{\sigma}_{k, c}^2 = \sigma_{k, c}^{2, \text{src}}
-
-$$
-
-
-The layer anchors completely to the robust Phase 0 source prior. There is zero division-by-zero risk and zero instability.
-
-
-#### Q4: "Does PMSA-BN require backpropagation or test-time optimization?"
-
-**Answer:** No. PMSA-BN is 100% gradient-free and optimization-free. It performs only two forward passes:
-
-* **Pass 1:** Forward pass with source parameters to extract confident pseudo-masks.
-
-* **Pass 2:** Forward pass with prior-matched, shift-adaptive statistics.
-
-Total test-time latency on an edge GPU (e.g., NVIDIA T4 or RTX 3060) is **$< 12$ milliseconds per slice**, enabling real-time clinical deployment.
-
-
-#### Q5: "How does the Law of Total Variance behave when classes overlap?"
-
-**Answer:** Anatomical compartments in segmentation are mutually exclusive (each pixel has a unique argmax ground-truth label). Even with soft pseudo-probabilities $p_{k, h, w} \in [0, 1]$, the projection satisfies $\sum_{k=1}^K p_{k, h, w} = 1.0$. The Law of Total Variance remains mathematically exact.
-
-
----
-
-
-## 9. Quickstart: Reproduce All Proofs & Benchmarks
-
-The repository is organized for reviewer simplicity with **two standalone benchmark suites**:
-
-* **[`kaggle_unified_benchmark.py`](kaggle_unified_benchmark.py)**: The all-in-one single-cell runner covering all 5 clinical imaging domains (Retinal Fundus, Endoscopic Polyp, Chest Radiography, Cutaneous Dermoscopy, and Neuro-Oncology MRI) with automatic dataset mounting, Phase 0 prior extraction, baseline comparisons (Source Only, TENT, AdaBN, $\alpha$-BN, InTEnt), and Figure 1 generation.
-* **[`kaggle_brain_tumor_single_cell.py`](kaggle_brain_tumor_single_cell.py)**: The specialized multi-class 3D MRI pipeline (BraTS 2019 $\to$ BraTS 2020) evaluating Whole Tumor (WT), Tumor Core (TC), and Active Enhancing Tumor (ET) at $B = 1$.
-
-### Local Environment Setup
+**Install**
 
 ```bash
 git clone https://github.com/SubhamBhat/pmsa-bn.git
 cd pmsa-bn
-
-# Install dependencies
-pip install torch torchvision numpy matplotlib scipy pillow nibabel h5py albumentations segmentation-models-pytorch
+pip install -r requirements.txt
 ```
 
-### Reproducing Visual Proofs & Stability Limits
+**Use PMSA-BN on your own network**
+
+```python
+from pmsa_bn.adaptation.pmsa_bn import replace_bn_with_pmsa
+from pmsa_bn.adaptation.source_stats import collect_and_save, load_source_stats, inject_source_stats
+from pmsa_bn.adaptation.adaptor import PMSAAdaptor
+
+# Phase 0 (once): class-conditional statistics on the labelled source training set
+collect_and_save(model, source_train_loader, device="cuda", save_dir="./source_stats")
+
+# Replace every BatchNorm2d and load the stored statistics
+model = replace_bn_with_pmsa(model, num_classes=3, tau=0.5, kappa_mu=8.0, kappa_sigma=16.0)
+inject_source_stats(model, load_source_stats("./source_stats"))
+
+# Phase 1: adapt each test image independently (B = 1, two forward passes)
+adaptor = PMSAAdaptor(model, em_iterations=1)
+probs, diagnostics = adaptor.adapt(image)        # image: [1, 3, H, W]
+segmentation = probs.argmax(dim=1)
+```
+
+**Reproduce the benchmarks.** `benchmarks/kaggle_unified_benchmark.py` runs as a single Kaggle cell. Set `DOMAIN` (`"fundus"`, `"polyp"`, `"cxr"`, `"derm"`, `"brain"` or `"all"`) and `BACKBONE` (`"resnet34"` or `"mobilenet_v2"`) in `USER_CFG` at the top of the file. Source models are trained automatically if no checkpoint is found. See [docs/benchmark_pairs_registry.md](docs/benchmark_pairs_registry.md) for all pairs.
+
+**Reproduce the shrinkage analysis**
 
 ```bash
-# 1. Verify Empirical Bayes numerical stability limits (asymptotics when N_k -> 0 and N_k -> 1)
-python proof_shrinkage_numerical_stability.py
-
-# 2. Generate layerwise feature-map mask shrinkage through ResNet-34
-python generate_layerwise_shrinkage_proof.py
-
-# 3. Generate 3-panel batch-size sensitivity graphs (Figure 1: B in {1, 2, 4, 8, 16})
-python generate_best_batch_fig.py
+python tools/proof_shrinkage_numerical_stability.py     # numerical trace of Section 3
+python tools/generate_layerwise_shrinkage_proof.py      # figures/fig_layerwise_shrinkage_proof.png
+python tools/generate_shrinkage_visual_explanation.py   # figures/fig_shrinkage_visual_proof.png
+python tools/generate_best_batch_fig.py                 # batch-size figures
 ```
 
-### How to Run on Kaggle (Step-by-Step)
+---
 
-#### Option A: Unified Multi-Domain Benchmark (`kaggle_unified_benchmark.py`)
-1. Create a new notebook on Kaggle with **GPU P100 / T4 x2**.
-2. Mount the dataset corresponding to your target domain (e.g. `REFUGE`, `Kvasir-SEG`, `chest-xray-masks-and-labels`, `ISIC2018`, or `BraTS2020`).
-3. Set `USER_CFG['DOMAIN']` at the top of `kaggle_unified_benchmark.py`:
-   ```python
-   USER_CFG = dict(
-       DOMAIN = "fundus",     # Options: "fundus", "polyp", "cxr", "derm", "brain", or "all"
-       BACKBONE = "resnet34", # Options: "mobilenet_v2", "resnet34", "resnet50"
-       ...
-   )
-   ```
-4. Paste and execute the script in a single cell. It will auto-detect inputs, compute Phase 0 priors, run test-time adaptation at $B = 1$, output statistical significance ($t$-test and Wilcoxon $p$-values), and save publication plots (`figures/fig1_batch_size.png` and `figures/fig_cmp_<target>.png`).
+## 10. License
 
-#### Option B: Neuro-Oncology MRI Benchmark (`kaggle_brain_tumor_single_cell.py`)
-1. Create a Kaggle notebook and attach:
-   * **Source:** `walidrehamnia/brain-tumor-segmentation-brats-2019-train-valid`
-   * **Target:** `awsaf49/brats2020-training-data`
-2. Select backbone in `CFG.ENCODER` (`resnet34` or `mobilenet_v2`).
-3. Paste and run the single cell to train the source model, extract 4-class Phase 0 priors, and run $B = 1$ test-time adaptation across all 6 methods.
+Released under the [MIT License](LICENSE). Datasets are subject to their own licenses; please obtain them from the original providers.

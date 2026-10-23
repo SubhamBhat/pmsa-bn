@@ -8,6 +8,8 @@ RUN:
     python train.py
 """
 
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))  # repo root
 import os
 import torch
 import torch.nn as nn
@@ -17,9 +19,9 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 import numpy as np
 
-import config
-from data.fundus_dataset import get_dataloaders
-from utils.metrics import evaluate_batch, aggregate_results
+from pmsa_bn import config
+from pmsa_bn.data.fundus_dataset import get_dataloaders
+from pmsa_bn.utils.metrics import evaluate_batch, aggregate_results
 
 
 # ─────────────────────────────────────────────────────────────────────────

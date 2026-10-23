@@ -36,16 +36,18 @@ The posterior distribution given N target observations is also NIG:
 where:
     gamma = N / (N + kappa_mu)
 
-Similarly, for the posterior marginal variance of sigma^2, the expectation is:
+For the variance we use the analogous pseudo-count (degrees-of-freedom) weighting,
+which approximates the posterior mean of sigma^2 (it drops the small
+mean-difference term and the -2 in the posterior degrees of freedom):
     sigma^2_post = (max(N - 1, 0) * s^2 + kappa_sigma * sigma^2_src) / (max(N - 1, 0) + kappa_sigma)
                  = eta * s^2 + (1 - eta) * sigma^2_src
 where:
     eta = max(N - 1, 0) / (max(N - 1, 0) + kappa_sigma)
 
 Conclusion:
-Equations 3 & 4 in PMSA-BN are the EXACT minimum mean squared error (MMSE)
-Bayes estimators under standard conjugate Gaussian priors. kappa_mu and kappa_sigma
-have the formal mathematical meaning of PRIOR PSEUDO-OBSERVATIONS.
+Equation 3 (mean) is exactly the conjugate posterior mean; Equation 4 (variance)
+is the corresponding pseudo-count approximation. kappa_mu and kappa_sigma are
+PRIOR PSEUDO-OBSERVATIONS: how many target positions the source estimate is worth.
 """)
 
 def numerical_layer_simulation():
@@ -165,7 +167,7 @@ Exact ablation results from our benchmark runs on tiny structures:
    - Prior Matching WITHOUT Shrinkage:                    0.8402 Dice
    - Prior Matching WITH SHRINKAGE (PMSA-BN):             0.8456 Dice  <-- Only +0.005 gain!
    
-CRITICAL LESSON FOR SIR:
+KEY TAKEAWAY:
 On large lesions (ISIC, CXR lungs), shrinkage barely changes anything (+0.005)
 because N_k is large (N_k >> kappa).
 BUT on tiny structures (Optic Cup, Diminutive Polyps), shrinkage is the difference

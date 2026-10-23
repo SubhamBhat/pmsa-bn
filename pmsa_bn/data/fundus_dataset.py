@@ -26,8 +26,7 @@ from albumentations.pytorch import ToTensorV2
 import cv2
 
 import sys
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import config
+from pmsa_bn import config
 
 
 # ───────────────────────────────────────────────────────────────
