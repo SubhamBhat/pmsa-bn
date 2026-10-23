@@ -1291,40 +1291,52 @@ Total test-time latency on an edge GPU (e.g., NVIDIA T4 or RTX 3060) is **$< 12$
 
 ## 9. Quickstart: Reproduce All Proofs & Benchmarks
 
+The repository is organized for reviewer simplicity with **two standalone benchmark suites**:
 
-Clone this repository and verify all mathematical proofs and visual artifacts:
+* **[`kaggle_unified_benchmark.py`](kaggle_unified_benchmark.py)**: The all-in-one single-cell runner covering all 5 clinical imaging domains (Retinal Fundus, Endoscopic Polyp, Chest Radiography, Cutaneous Dermoscopy, and Neuro-Oncology MRI) with automatic dataset mounting, Phase 0 prior extraction, baseline comparisons (Source Only, TENT, AdaBN, $\alpha$-BN, InTEnt), and Figure 1 generation.
+* **[`kaggle_brain_tumor_single_cell.py`](kaggle_brain_tumor_single_cell.py)**: The specialized multi-class 3D MRI pipeline (BraTS 2019 $\to$ BraTS 2020) evaluating Whole Tumor (WT), Tumor Core (TC), and Active Enhancing Tumor (ET) at $B = 1$.
 
+### Local Environment Setup
 
 ```bash
-
 git clone https://github.com/SubhamBhat/pmsa-bn.git
-
 cd pmsa-bn
 
-
-# Install lightweight dependencies
-
-pip install torch torchvision numpy matplotlib scipy pillow nibabel h5py
-
-
-# 1. Run numerical stability and limit verification
-
-python proof_shrinkage_numerical_stability.py
-
-
-# 2. Generate layerwise shrinkage proof with real patient fundus data
-
-python generate_layerwise_shrinkage_proof.py
-
-
-# 3. Generate 3-panel batch-size sensitivity graphs
-
-python generate_best_batch_fig.py
-
-
-# 4. Run single-cell Kaggle adaptation script
-
-python kaggle_brain_tumor_single_cell.py
-
+# Install dependencies
+pip install torch torchvision numpy matplotlib scipy pillow nibabel h5py albumentations segmentation-models-pytorch
 ```
 
+### Reproducing Visual Proofs & Stability Limits
+
+```bash
+# 1. Verify Empirical Bayes numerical stability limits (asymptotics when N_k -> 0 and N_k -> 1)
+python proof_shrinkage_numerical_stability.py
+
+# 2. Generate layerwise feature-map mask shrinkage through ResNet-34
+python generate_layerwise_shrinkage_proof.py
+
+# 3. Generate 3-panel batch-size sensitivity graphs (Figure 1: B in {1, 2, 4, 8, 16})
+python generate_best_batch_fig.py
+```
+
+### How to Run on Kaggle (Step-by-Step)
+
+#### Option A: Unified Multi-Domain Benchmark (`kaggle_unified_benchmark.py`)
+1. Create a new notebook on Kaggle with **GPU P100 / T4 x2**.
+2. Mount the dataset corresponding to your target domain (e.g. `REFUGE`, `Kvasir-SEG`, `chest-xray-masks-and-labels`, `ISIC2018`, or `BraTS2020`).
+3. Set `USER_CFG['DOMAIN']` at the top of `kaggle_unified_benchmark.py`:
+   ```python
+   USER_CFG = dict(
+       DOMAIN = "fundus",     # Options: "fundus", "polyp", "cxr", "derm", "brain", or "all"
+       BACKBONE = "resnet34", # Options: "mobilenet_v2", "resnet34", "resnet50"
+       ...
+   )
+   ```
+4. Paste and execute the script in a single cell. It will auto-detect inputs, compute Phase 0 priors, run test-time adaptation at $B = 1$, output statistical significance ($t$-test and Wilcoxon $p$-values), and save publication plots (`fig1_batch_size.png` and `fig_cmp_<target>.png`).
+
+#### Option B: Neuro-Oncology MRI Benchmark (`kaggle_brain_tumor_single_cell.py`)
+1. Create a Kaggle notebook and attach:
+   * **Source:** `walidrehamnia/brain-tumor-segmentation-brats-2019-train-valid`
+   * **Target:** `awsaf49/brats2020-training-data`
+2. Select backbone in `CFG.ENCODER` (`resnet34` or `mobilenet_v2`).
+3. Paste and run the single cell to train the source model, extract 4-class Phase 0 priors, and run $B = 1$ test-time adaptation across all 6 methods.
