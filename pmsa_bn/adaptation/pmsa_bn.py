@@ -263,13 +263,14 @@ class PMSABatchNorm2d(nn.Module):
 
         B, C, H, W = x.shape
 
-        # Downsample pseudo-mask to layer resolution (Step 3 prerequisite)
+        # Bring the full-resolution pseudo-mask to this layer's resolution by
+        # adaptive average pooling: each feature position receives the fraction
+        # of its input-pixel block covered by each class (Step 3 prerequisite).
+        # The pooled mask is always computed from the full-resolution mask, for
+        # encoder (downsampled) and decoder (upsampled) layers alike.
         mask = self.pseudo_mask.to(x.device)        # [1, K, H_orig, W_orig]
         if mask.shape[2] != H or mask.shape[3] != W:
-            mask = F.interpolate(
-                mask, size=(H, W),
-                mode="bilinear", align_corners=False
-            )
+            mask = F.adaptive_avg_pool2d(mask.float(), (H, W))
         mask = mask.expand(B, -1, -1, -1)           # [B, K, H, W]
 
         # ── Step 3: Class-conditional target statistics ───────────────────
