@@ -86,7 +86,7 @@ PMSA-BN changes only the normalization statistics. The network weights and the B
 
 ### 2.2 Phase 0: source class statistics (offline, once)
 
-After training, the labelled source training images are passed through the network once, without augmentation. At every BN layer the ground-truth masks are resized to the layer resolution, giving class weights $`w_k(i,j)`$ (see [Section 3.1](#step-by-step-how-the-mask-is-brought-to-each-bn-layers-resolution) for exactly how). From these we accumulate the class-conditional mean $`\mu^{src}_k`$, variance $`\sigma^{2,src}_k`$ and proportion $`\pi^{src}_k`$ of every channel. Only these summaries are stored ($`2K`$ numbers per channel and $`K`$ proportions per layer); **no source images are needed at test time**. As a check, $`\sum_k \pi^{src}_k\mu^{src}_k`$ matches the BN running mean up to the small gap caused by training-time augmentation.
+After training, the labelled source training images are passed through the network once, without augmentation. At every BN layer the ground-truth label maps are resized to the layer resolution by nearest-neighbour sampling, giving class weights $`w_k(i,j)\in\{0,1\}`$ (see [Section 3.1](#a-phase-0-nearest-neighbour-resizing-of-the-source-labels) for the details and justification). From these we accumulate the class-conditional mean $`\mu^{src}_k`$, variance $`\sigma^{2,src}_k`$ and proportion $`\pi^{src}_k`$ of every channel. Only these summaries are stored ($`2K`$ numbers per channel and $`K`$ proportions per layer); **no source images are needed at test time**. As a check, $`\sum_k \pi^{src}_k\mu^{src}_k`$ matches the BN running mean up to the small gap caused by training-time augmentation.
 
 ### 2.3 Phase 1: adaptation of each test image (two forward passes)
 
@@ -178,35 +178,16 @@ Class-conditional statistics solve the label-proportion confound, but they creat
 
 ### 3.1 How the mask shrinks through the encoder and grows back in the decoder
 
-#### Step by step: how the mask is brought to each BN layer's resolution
+#### How the masks reach every BN layer's resolution
 
-The confident pseudo-mask $`M`$ from pass 1 lives at the **input resolution** (384×384 for fundus). It has one channel per class: $`M_k(u,v)=1`$ if pixel $`(u,v)`$ is a confident pixel of class $`k`$, and $`0`$ otherwise. An uncertain pixel is $`0`$ in **every** channel.
+A BN layer normalizes a feature map whose size $`H_l\times W_l`$ differs from the image size $`H\times W`$: 192×192 after the first stride-2 convolution, down to 12×12 at the bottleneck, and back up to 384×384 at the end of the decoder. To compute class statistics at a layer we need, for every feature position $`(i,j)`$, a weight $`w^{(l)}_k(i,j)`$ saying how much of it belongs to class $`k`$. PMSA-BN obtains these weights in two places, exactly as implemented in [`benchmarks/kaggle_unified_benchmark.py`](benchmarks/kaggle_unified_benchmark.py):
 
-A BN layer, however, normalizes a feature map of a different size, $`H_l\times W_l`$: 192×192 after the first stride-2 convolution, down to 12×12 at the bottleneck, and back up to 384×384 at the end of the decoder. To compute class statistics at that layer we need to know, for every feature position $`(i,j)`$, how much of it belongs to each class. Each PMSA-BN layer obtains this by **adaptive average pooling** of the full-resolution mask, computed inside the layer just before its statistics:
+| Phase | Input mask (full resolution) | Resized to each BN layer by | Weights | Code |
+| :-- | :-- | :-- | :-- | :-- |
+| **Phase 0** (offline, source) | ground-truth label map $`\ell`$ | **nearest-neighbour** resizing | hard, $`w\in\{0,1\}`$ | `F.interpolate(lbl, (H_l, W_l), mode="nearest")` |
+| **Phase 1** (test time, target) | confident pseudo-mask $`M`$ | **adaptive average pooling** | soft, $`w\in[0,1]`$ | `F.adaptive_avg_pool2d(M, (H_l, W_l))` |
 
-```python
-# inside PMSABatchNorm2d.forward(x), x: [B, C, H_l, W_l]
-w = F.adaptive_avg_pool2d(M, (H_l, W_l))      # M: [1, K, H, W]  ->  w: [1, K, H_l, W_l]
-N = w.sum(dim=(2, 3))                         # effective count of each class at this layer
-```
-
-**1. What one pooled value means.** With stride $`S_l=H/H_l`$, feature position $`(i,j)`$ corresponds to an $`S_l\times S_l`$ block of input pixels. Adaptive average pooling replaces that block by its mean:
-
-```math
-w^{(l)}_k(i,j)=\frac{1}{S_l^{2}}\sum_{u=0}^{S_l-1}\sum_{v=0}^{S_l-1}M_k\big(iS_l+u,\ jS_l+v\big)\ \in[0,1].
-```
-
-So $`w^{(l)}_k(i,j)`$ is simply **the fraction of that block covered by confident class-$`k`$ pixels**: 1 if the block lies entirely inside the structure, 0 if it lies entirely outside, and a value in between if it straddles a boundary. For a 12×12 bottleneck ($`S_l=32`$), each position summarizes a 32×32 block of 1024 input pixels.
-
-**2. Why the total count shrinks by exactly $`S_l^2`$.** Summing over all positions adds up every input pixel exactly once and divides by $`S_l^2`$:
-
-```math
-N^{(l)}_k=\sum_{i=1}^{H_l}\sum_{j=1}^{W_l}w^{(l)}_k(i,j)=\frac{1}{S_l^2}\sum_{u,v}M_k(u,v)=\frac{N^{(0)}_k}{S_l^{2}}\ \approx\ \pi_k\,H_l\,W_l .
-```
-
-The **fraction** of the image a class covers is preserved; only the **number of positions** carrying it falls, quadratically with the stride.
-
-**3. Encoder (downsampling) and decoder (upsampling) are treated the same way.** Every BN layer pools **directly from the full-resolution mask $`M`$** to its own size. Nothing is chained: a layer never re-pools the previous layer's pooled mask, and a decoder layer never upsamples a coarse mask. When the decoder upsamples the *features* back to 24, 48, 96, 192 and 384 pixels, the mask for those layers is pooled again from $`M`$ with a smaller stride, so it is sharp again and $`N_k`$ grows back. That is why the decoder rows in the tables below mirror the encoder rows.
+Two rules hold in both phases. (i) The resizing happens **inside every BN layer**, just before its statistics are computed, from the **full-resolution** mask; nothing is chained from the previous layer. (ii) **Encoder and decoder layers are treated identically.** When the decoder upsamples the *features* back to 24, 48, 96, 192 and 384 pixels, the mask for those layers is resized again from the full-resolution mask with a smaller stride, so it is sharp again and $`N_k`$ grows back. The stride $`S_l=H/H_l`$ of every stage is:
 
 | Network part | BN layers | Feature resolution $`H_l\times W_l`$ | Stride $`S_l=384/H_l`$ | Input pixels per feature position |
 | :-- | :-: | :-: | :-: | :-: |
@@ -219,12 +200,117 @@ The **fraction** of the image a class covers is preserved; only the **number of 
 | Decoder block 2 | 2 | 48×48 | 8 | 64 |
 | Decoder block 3 | 2 | 96×96 | 4 | 16 |
 | Decoder block 4 | 2 | 192×192 | 2 | 4 |
-| Decoder block 5 | 2 | 384×384 | 1 (no pooling) | 1 |
+| Decoder block 5 | 2 | 384×384 | 1 (no resizing) | 1 |
 
-**4. A small worked example.** Take an 8×8 mask with a 3×3 cup (9 pixels) at rows 2–4, columns 3–5:
+##### A. Phase 0: nearest-neighbour resizing of the source labels
+
+**What the code does.** In Phase 0 a forward hook on every BN layer receives the layer input $`x\in\mathbb R^{B\times C\times H_l\times W_l}`$ together with the integer label map $`\ell\in\{0,\dots,K-1\}^{H\times W}`$ of the source image, and resizes the label map to the feature resolution:
+
+```python
+# benchmarks/kaggle_unified_benchmark.py, Phase-0 hook of every BN layer
+ld = F.interpolate(lbl.float().unsqueeze(1), (H_l, W_l), mode="nearest").squeeze(1).long()
+for k in range(K):
+    mk = (ld == k).float()                          # hard class weight w_k in {0, 1}
+    S0[k] += mk.sum();  S1[k] += (x * mk).sum(...);  S2[k] += (x**2 * mk).sum(...)
+```
+
+**1. The sampling rule.** PyTorch's `nearest` mode maps output position $`(i,j)`$ to input pixel $`(\lfloor iH/H_l\rfloor,\ \lfloor jW/W_l\rfloor)`$. With an integer stride $`S_l`$ this is the **top-left pixel of the $`S_l\times S_l`$ block** that the feature position covers:
+
+```math
+\ell^{(l)}(i,j)=\ell\big(iS_l,\ jS_l\big),\qquad
+w^{(l)}_k(i,j)=\mathbf 1\big[\ell(iS_l,\ jS_l)=k\big]\in\{0,1\}.
+```
+
+Each feature position is assigned **entirely** to the class of one sampled pixel, so the classes still partition every layer: $`\sum_k w^{(l)}_k(i,j)=1`$. (Checked in PyTorch: for an 8×8 map resized to 4×4, the copied pixels are those with flat indices 0, 2, 4, 6, 16, 18, … i.e. rows and columns 0, 2, 4, 6.)
+
+**2. Worked example.** Same 8×8 label map with a 3×3 cup (9 pixels) at rows 2–4, columns 3–5:
 
 ```text
-input 8×8 (N = 9)        pooled to 4×4, S = 2 (N = 2.25)      pooled to 2×2, S = 4 (N = 0.5625)
+label 8×8 (cup = 9 px)    nearest to 4×4, S = 2         nearest to 2×2, S = 4
+                          samples rows/cols 0,2,4,6     samples rows/cols 0,4
+0 0 0 0 0 0 0 0
+0 0 0 0 0 0 0 0           0 0 0 0
+0 0 0 C C C 0 0           0 0 C 0                       0 0
+0 0 0 C C C 0 0           0 0 C 0                       0 C
+0 0 0 C C C 0 0           0 0 0 0
+0 0 0 0 0 0 0 0           N_cup = 2                     N_cup = 1
+0 0 0 0 0 0 0 0           (area / S² = 2.25)            (area / S² = 0.5625)
+0 0 0 0 0 0 0 0
+```
+
+For this image the hard count is 2 instead of 2.25, and 1 instead of 0.5625. Shift the same cup by one pixel (rows 1–3, columns 1–3) and the 2×2 count becomes **0**. For a single image, nearest-neighbour is therefore coarse. Phase 0, however, does not use a single image.
+
+**3. Justification 1: the expected count is exact.** Let the position of a structure relative to the sampling grid be random, i.e. a uniform offset $`(U,V)`$ over the $`S_l\times S_l`$ block, which holds across source images whose anatomy appears at varying positions. Then the hard weight is an **unbiased estimate of the average-pooled weight**:
+
+```math
+\mathbb E_{U,V}\Big[\mathbf 1\big[\ell(iS_l+U,\ jS_l+V)=k\big]\Big]
+=\frac{1}{S_l^2}\sum_{u=0}^{S_l-1}\sum_{v=0}^{S_l-1}\mathbf 1\big[\ell(iS_l+u,\ jS_l+v)=k\big]
+=\bar w^{(l)}_k(i,j),
+```
+
+where $`\bar w`$ is the adaptive-average-pooled weight of Part B. Summing over positions,
+
+```math
+\mathbb E\big[N^{(l)}_k\big]=\sum_{i,j}\bar w^{(l)}_k(i,j)=\frac{N^{(0)}_k}{S_l^2}=\pi_k\,H_l\,W_l .
+```
+
+(Checked numerically: averaging the 2×2 nearest count of the 3×3 cup over all 64 placements on the 8×8 grid gives exactly $`0.5625=9/16`$.) Consequently the stored source proportions $`\pi^{src}_k=\sum_n N^{(l)}_{k,n}\big/\sum_n H_lW_l`$, accumulated over all source images $`n`$, are **consistent** estimates of the true class fraction at layer $`l`$.
+
+**4. Justification 2: only boundary positions add noise.** For a fixed position, the hard weight is a Bernoulli variable with success probability $`\bar w^{(l)}_k(i,j)`$. Positions entirely inside or outside the structure ($`\bar w\in\{0,1\}`$) are exact; only boundary positions ($`0<\bar w<1`$) are random. Hence
+
+```math
+\mathrm{Var}\big(N^{(l)}_k\big)\le\sum_{i,j}\bar w^{(l)}_k(i,j)\big(1-\bar w^{(l)}_k(i,j)\big)\le\frac{\#\{\text{boundary positions}\}}{4}.
+```
+
+**5. Justification 3: Phase 0 averages over many images.** The source class statistics are pooled over the whole source training set (up to 400 images in the benchmark):
+
+```math
+\mu^{src}_k=\frac{\sum_n\sum_{i,j}w^{(l)}_{k,n}(i,j)\,x_n(i,j)}{\sum_n\sum_{i,j}w^{(l)}_{k,n}(i,j)},\qquad
+\sigma^{2,src}_k=\frac{\sum_n\sum_{i,j}w^{(l)}_{k,n}(i,j)\,x_n(i,j)^2}{\sum_n\sum_{i,j}w^{(l)}_{k,n}(i,j)}-\big(\mu^{src}_k\big)^2 .
+```
+
+The effective sample size is the **total** count over images, $`\sum_n N^{(l)}_{k,n}`$, not the count of one image. For a small optic cup (0.4 % of the image) at the 12×12 bottleneck, one image gives $`N\approx0.58`$ positions, but 400 images give about $`230`$, so the standard error of $`\mu^{src}_k`$ is about $`\sigma/\sqrt{230}\approx0.07\,\sigma`$ instead of $`\sigma/\sqrt{0.58}\approx1.3\,\sigma`$. The sampling noise of Justification 2 averages out in the same way.
+
+**6. Justification 4: boundary assignment has a bounded effect.** A boundary position is assigned entirely to one class, so its feature, which mixes two classes, is counted in that class. If a fraction $`\rho_k`$ of the class-$`k`$ positions are boundary positions, the class mean can move by at most
+
+```math
+\big|\mu^{src}_{k,\text{nearest}}-\mu^{src}_{k,\text{pure}}\big|\ \le\ \rho_k\,\max_{j\neq k}\big|\mu_j-\mu_k\big| ,
+```
+
+and $`\rho_k`$ is small at shallow layers, where most statistics are collected. Because the BN running statistics stored in the network were themselves computed from all pixels, the check $`\sum_k\pi^{src}_k\mu^{src}_k\approx\mu^{src}`$ still holds.
+
+**Why nearest-neighbour is acceptable in Phase 0 but not at test time.** Phase 0 estimates *population* statistics from hundreds of labelled images: hard weights are unbiased (Justification 1), and their noise averages out (Justifications 2–3). At test time there is **one** image and, at deep layers, often less than one feature position per small structure. A single sampled pixel can then decide whether the class is seen at all (the 0, 1 or 2 counts above), so test time uses the exact fractional weights of Part B, and shrinkage handles the remaining uncertainty.
+
+##### B. Test time: adaptive average pooling of the pseudo-mask
+
+**What the code does.** The confident pseudo-mask $`M`$ from pass 1 lives at the input resolution and has one channel per class: $`M_k(u,v)=1`$ for a confident pixel of class $`k`$, and $`0`$ otherwise; an uncertain pixel is $`0`$ in **every** channel. Every PMSA-BN layer pools it to its own size, just before computing Eq. (2):
+
+```python
+# benchmarks/kaggle_unified_benchmark.py (and pmsa_bn/adaptation/pmsa_bn.py), inside each PMSA-BN layer
+w = F.adaptive_avg_pool2d(M, (H_l, W_l))      # M: [1, K, H, W]  ->  w: [1, K, H_l, W_l]
+N = w.sum(dim=(2, 3))                         # effective count of each class at this layer
+```
+
+**1. What one pooled value means.** Feature position $`(i,j)`$ covers an $`S_l\times S_l`$ block of input pixels, and adaptive average pooling replaces the block by its mean:
+
+```math
+w^{(l)}_k(i,j)=\frac{1}{S_l^{2}}\sum_{u=0}^{S_l-1}\sum_{v=0}^{S_l-1}M_k\big(iS_l+u,\ jS_l+v\big)\ \in[0,1].
+```
+
+So $`w^{(l)}_k(i,j)`$ is **the fraction of that block covered by confident class-$`k`$ pixels**: 1 if the block lies entirely inside the structure, 0 if entirely outside, and a value in between at a boundary. At the 12×12 bottleneck ($`S_l=32`$), each position summarizes 1024 input pixels.
+
+**2. The count shrinks by exactly $`S_l^2`$.** Summing over positions adds up every input pixel once and divides by $`S_l^2`$:
+
+```math
+N^{(l)}_k=\sum_{i=1}^{H_l}\sum_{j=1}^{W_l}w^{(l)}_k(i,j)=\frac{1}{S_l^2}\sum_{u,v}M_k(u,v)=\frac{N^{(0)}_k}{S_l^{2}}\ \approx\ \pi_k\,H_l\,W_l .
+```
+
+The **fraction** of the image a class covers is preserved; only the **number of positions** carrying it falls, quadratically with the stride. Unlike nearest-neighbour, this holds for **every single image**, not only on average.
+
+**3. Worked example.** The same 3×3 cup, now pooled:
+
+```text
+mask 8×8 (N = 9)         pooled to 4×4, S = 2 (N = 2.25)      pooled to 2×2, S = 4 (N = 0.5625)
 0 0 0 0 0 0 0 0
 0 0 0 0 0 0 0 0          0     0     0     0
 0 0 0 1 1 1 0 0          0    0.50  1.00   0                  0.125   0.250
@@ -235,13 +321,11 @@ input 8×8 (N = 9)        pooled to 4×4, S = 2 (N = 2.25)      pooled to 2×2, 
 0 0 0 0 0 0 0 0
 ```
 
-At 4×4, the block covering rows 2–3 and columns 4–5 lies fully inside the cup (1.00); the block covering rows 2–3 and columns 2–3 is half cup (0.50); and so on. The counts are exactly $`9/2^2=2.25`$ and $`9/4^2=0.5625`$. These fractional weights then enter Eq. (2): a boundary position contributes to a class in proportion to the area it covers, and an uncertain pixel contributes to no class.
+The counts are exactly $`9/2^2=2.25`$ and $`9/4^2=0.5625`$, whatever the position of the cup. These fractional weights enter Eq. (2): a boundary position contributes to a class in proportion to the area it covers, and an uncertain pixel contributes to no class (so $`\sum_k w^{(l)}_k(i,j)\le1`$).
 
-**5. Why average pooling and not nearest-neighbour or bilinear resizing.** On the same 2×2 example, nearest-neighbour resizing picks one pixel per block and gives the cup a count of **1** (it happened to hit a cup pixel; it could just as well have missed it and given **0**), while bilinear resizing samples a few pixels near each block centre and gives **0.25**. Only average pooling gives the true 0.5625, because it looks at every pixel of every block. At the bottleneck, where a small cup covers less than one feature position, this difference decides whether the class is seen at all.
+**4. Why not nearest-neighbour or bilinear here.** On the same 2×2 example, nearest-neighbour gives a count of 1, or 0 after a one-pixel shift, and bilinear resizing (which samples a few pixels near each block centre) gives 0.25; only average pooling gives the true 0.5625 for this image. With one test image and less than one feature position per small structure at the bottleneck, this decides whether the class is seen at all. The remaining uncertainty of small counts is handled by shrinkage (Section 3.3).
 
-**6. The same step in Phase 0.** In Phase 0 the ground-truth labels are brought to each BN layer's resolution in the same per-layer way: by adaptive average pooling in the BraTS benchmark, and by nearest-neighbour resizing of the label map in the 17-transfer benchmark (`benchmarks/kaggle_unified_benchmark.py`). Because Phase 0 runs over hundreds of source images, its class statistics average over many positions and are not limited by a single image's tiny $`N_k`$.
-
-#### Mask size at every BN layer
+#### Mask size at every BN layer (test time)
 
 The ResNet-34 U-Net used in the paper has 46 BN layers (36 in the encoder, 10 in the decoder). For a 384×384 input:
 
