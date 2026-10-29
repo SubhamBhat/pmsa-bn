@@ -1,0 +1,358 @@
+<USER_REQUEST>
+% PMSA-BN — ISBI 4-page paper
+% Build: pdflatex → bibtex → pdflatex → pdflatex  (needs spconf.sty, IEEEbib.bst, refs.bib)
+% Rule: technical content must end on page 4; page 5 may hold ONLY
+%       references, ethics statement and acknowledgments.
+% Items marked \todo{...} (red) need real values before submission.
+% --------------------------------------------------------------------------
+\documentclass{article}
+\usepackage{spconf,amsmath,amssymb,amsthm,graphicx}
+\newtheorem{proposition}{Proposition}
+\usepackage{booktabs,multirow}
+\usepackage{algorithm}
+\usepackage[noend]{algpseudocode}
+\usepackage[colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue]{hyperref}
+\algrenewcommand\algorithmicrequire{\textbf{Input:}}
+\algrenewcommand\algorithmicensure{\textbf{Output:}}
+\usepackage[table]{xcolor}
+\usepackage{enumitem}
+\setlist{nosep, leftmargin=12pt}
+
+\newcommand{\todo}[1]{\textcolor{red}{[#1]}}
+% spconf sets \flushbottom, which stretches gaps around headings; disable it
+\raggedbottom
+% Tighter space around section headings (spconf's heading style is kept)
+\makeatletter
+\renewcommand\section{\@startsection{section}{1}{\z@}%
+  {-1.6ex \@plus -.4ex \@minus -.2ex}{0.8ex \@plus .2ex}{\normalfont}}
+\renewcommand\subsection{\@startsection{subsection}{2}{\z@}%
+  {-1.2ex \@plus -.3ex \@minus -.2ex}{0.5ex \@plus .2ex}{\normalfont}}
+\makeatother
+% Tighter (standard) spacing around floats and captions
+\setlength{\textfloatsep}{8pt plus 2pt minus 2pt}
+\setlength{\dbltextfloatsep}{8pt plus 2pt minus 2pt}
+\setlength{\intextsep}{6pt plus 2pt minus 2pt}
+\setlength{\abovecaptionskip}{4pt}
+\setlength{\belowcaptionskip}{0pt}
+\newcommand{\src}{\mathrm{src}}
+\newcommand{\PM}{\mathrm{PM}}
+\newcommand{\B}[1]{\textbf{#1}}
+
+% Title
+% -----
+\title{Prior-Matched, Shift-Adaptive Batch Normalization for\\
+Single-Image Test-Time Adaptation in Medical Image Segmentation}
+
+\name{Subham Bhat, Aritra Dutta}
+\address{Jadavpur University, Kolkata, India}
+
+\begin{document}
+\ninept   % 9-pt body (ISBI minimum); comment out if page 4 ends up with spare room
+\maketitle
+
+% ==========================================================================
+\begin{abstract}
+Re-estimating batch-normalization (BN) statistics on target data (AdaBN) is the simplest test-time adaptation for image segmentation, yet at a single batch size, it often degrades the source model: background pixels dominate the statistics, so a change in foreground fraction is mistaken for appearance shift, and every channel is replaced even if it barely shifted. We propose PMSA-BN, a training-free, episodic method that (i)~computes class-conditional target statistics from confident pseudo-masks, (ii)~shrinks them toward stored source class statistics when few pixels are available, (iii)~recombines them with the \emph{source} class proportions to cancel label-proportion shift, and (iv)~mixes source and target statistics per channel by a normalized Wasserstein shift. Without backpropagation and with hyperparameters set on source data only, PMSA-BN achieves the highest mean score on all 17 transfers across four modalities and two backbones at batch size one, outperforming TENT, AdaBN and even a label-tuned $\alpha$-BN, and never falls below the source model.
+\end{abstract}
+
+\begin{keywords}
+Test-time adaptation, batch normalization, domain shift, segmentation, label shift, medical image
+\end{keywords}
+
+% ==========================================================================
+\section{Introduction}
+\label{sec:intro}
+
+Image segmentation networks lose accuracy when the scanner, camera, protocol or patient population at deployment differs from their training
+data~\cite{karani2021tta}, and retraining at every site is rarely feasible. Test-time adaptation (TTA) adapts a trained model using only the unlabeled images it must segment. In clinical deployment, test images arrive one at a time \textbf{(??)} (as diagnostic scans arrive sequentially per patient examination), so TTA should work at batch size one, without backpropagation, and leave the model unchanged when no adaptation is needed.
+
+The lightest TTA methods adapt batch-normalization (BN) statistics, but they share a limitation specific to segmentation. BN statistics are pooled over all pixels, so they depend on how each class \emph{looks} and also on how much of the image it \emph{occupies}. The background dominates, and the size of the target structure (like an optic cup, a polyp, or a lesion) varies strongly between patients. A change in this foreground fraction alters the pooled statistics even if no structure changes its appearance, and re-estimating them treats it as a domain shift that, at batch size one \textbf{(only at training time!)} (where spatial label imbalance cannot be averaged across patients as done during training), cannot be smoothed out. Existing methods also adapt all channels alike, although a shift usually affects only
+some of them.
+
+\textbf{Related work.} AdaBN~\cite{li2018adabn} replaces the source BN statistics with test statistics; $\alpha$-BN~\cite{you2021alphabn} mixes the two with one global weight, and DUA~\cite{mirza2022dua} updates them over a test stream. All use pooled statistics and inherit the confound above. InTEnt~\cite{dong2024intent} ensembles predictions under several statistic mixes, weighted by entropy; as every member uses pooled statistics. It can only interpolate between confounded predictions, not remove the confound. Channel-selective normalization~\cite{vianna2024csn} adapts only some channels, for label shift in classification. TENT~\cite{wang2021tent} and medical methods that adapt normalization modules~\cite{karani2021tta} or prompts~\cite{chen2024vptta} need backpropagation at test time. None separates
+appearance from label-proportion shift inside each BN layer.
+
+We propose \textbf{PMSA-BN} (Prior-Matched, Shift-Adaptive Batch Normalization), a training-free method that adapts each BN layer to appearance shift but not to changes in class proportions. Our \textbf{contributions} are:
+\begin{itemize}
+\item \emph{Prior-matched statistics.} We estimate class-conditional target statistics from confident pseudo-masks and recombine them with the
+  \emph{source} class proportions. This provably separates appearance shift from label-proportion shift, i.e.\ a change in how much of the image each class occupies (Prop.~\ref{prop:inv}).
+\item \emph{Pseudo-count shrinkage.} We shrink these estimates toward stored source class statistics. This keeps them well-defined and stable for small structures at batch size one.
+\item \emph{Per-channel shift-adaptive mixing.} A normalized Wasserstein distance decides how much each channel adapts. Unshifted channels stay
+  unchanged, so the method does no alter anything where there is no shift.
+\item \emph{Broad evaluation.} We test on 17 transfers in four imaging modalities with two backbones, with all hyperparameters chosen without target data. PMSA-BN achieves the highest mean score on all 17 transfers. It beats TENT, AdaBN and even an $\alpha$-BN oracle whose $\alpha$ is tuned with target labels (an upper bound; PMSA-BN uses none), and never falls below the source model.
+\end{itemize}
+
+% ==========================================================================
+\section{Method}
+\label{sec:method}
+
+PMSA-BN changes only the normalization statistics of a trained network (Fig.~\ref{fig:overview}). Class-conditional source statistics are stored once after training (Sec.~\ref{ssec:phase0}); each test image is then adapted independently in two forward passes (Sec.~\ref{ssec:tta}).
+
+We consider $K$ classes that partition the image. %The classes must be disjoint, because the variance decomposition below requires it.
+For nested structures, such as the optic disc and cup, we therefore use background, rim (disc without cup) and cup, so that the classes are disjoint as Eq.~(\ref{eq:decomp}) requires. For a BN layer and channel $c$, $\mu^{\src}_c$ and $\sigma^{2,\src}_c$ are the stored running statistics. We drop layer and channel indices when clear.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{fig_pmsa_arch.png}
+\caption{PMSA-BN: source class statistics are stored once (Phase~0); each test image is adapted in two forward passes (Phase~1).}
+\label{fig:overview}
+\end{figure}
+
+\subsection{Source class statistics}
+\label{ssec:phase0}
+
+The pooled statistics of a BN channel decompose over the classes by the law of total variance:
+\begin{equation}
+\mu=\sum_k\pi_k\mu_k,\qquad
+\sigma^2=\sum_k\pi_k\sigma^2_k+\sum_k\pi_k(\mu_k-\mu)^2 .
+\label{eq:decomp}
+\end{equation}
+Here $\pi_k$ is the fraction of positions of class $k$, and $(\mu_k,\sigma^2_k)$ are its class statistics.
+
+After training, we pass the source training images through the network once \textbf{(re-training?)} (strictly offline forward calibration with frozen weights, with zero backpropagation), without augmentation. We average-pool the ground-truth masks (expert source annotations, used only here) to each BN layer's resolution \textbf{(mask map to image resolution?)} (downsampling full-resolution masks to match intermediate feature map grids $(H_l, W_l)$). This gives soft weights $w_k(i,j)\in[0,1]$, the fraction of each feature position \textbf{(How do you know that?)} (directly given by area-weighted average pooling over the receptive field) covered by class $k$. Average pooling, rather than nearest-neighbor sampling, handles positions that straddle a boundary in deep layers. From these weights, we compute the class statistics $\mu^{\src}_k$ and $\sigma^{2,\src}_k$ for every channel, and the proportions $\pi^{\src}_k$ for every layer. As a check, $\sum_k\pi^{\src}_k\mu^{\src}_k$ matches the BN running mean, up to the small gap caused by augmentation during training. Only these summaries are kept: $2K$ values per channel and $K$ proportions per layer. No source images are used at test time \textbf{(clear it)} (all source images are discarded, retaining only $<150$\,KB of scalar moments for strict privacy), so the method is source-free and patient data never leave the source site.
+
+\subsection{Test-time adaptation}
+\label{ssec:tta}
+
+\textbf{Pseudo-masks.} A first forward pass \textbf{(you mean one test image is passing through twice?)} (adaptation uses two lightweight forward passes total, taking $\approx 25$\,ms, with zero backpropagation) with the source statistics gives class probabilities $P^{(0)}$ (AdaBN statistics give worse masks at $B{=}1$; Sec.~\ref{sec:results}). We keep only confident pixels: $M_k=\{(i,j):\arg\max_{k'}P^{(0)}_{k'}=k,\ P^{(0)}_k>\theta_{hi}\}$ for each foreground class and $M_{bg}=\{(i,j):P^{(0)}_k<\theta_{lo}\ \forall k\neq bg\}$ for the background. Thresholds are fixed globally ($\tau_{hi}{=}0.90, \tau_{lo}{=}0.10$) across all 17 transfers without target tuning; discarding ambiguous boundary pixels ($0.10 \le P \le 0.90$) prevents confirmation bias in the statistics (Dice varies by $<0.004$ across $\theta_{hi} \in [0.80, 0.95]$). All other pixels are excluded from every mask, which keeps wrong labels out of the class statistics. For nested structures (an outer structure $\mathcal{O}$ enclosing an inner structure $\mathcal{I}$, such as the retinal optic disc and cup), the outer mask is defined by $\{P^{(0)}_{\mathcal{O}\setminus\mathcal{I}} + P^{(0)}_{\mathcal{I}} > \theta_{hi}\}$, the inner mask is restricted to $\mathcal{I} \cap \mathcal{O}$, and the outer margin (the rim, for disc and cup) is their difference.
+
+\textbf{Class-conditional statistics.} In the second pass, each BN layer computes statistics of its current input $x$. Layers are processed in forward order, because each layer's input depends on how the earlier layers were normalized; statistics from the first pass would therefore be wrong. We average-pool $M_k$ \textbf{(M of what?)} (the confident binary pseudo-mask for class $k$) to the layer's resolution to get $w_k$, and set $N_k=\sum_{i,j}w_k(i,j)$ \textbf{(w?)} (effective spatial footprint in feature units), summed over the batch if $B>1$. Then
+\begin{equation}
+\begin{aligned}
+\hat\mu_k&=\tfrac{1}{N_k}\textstyle\sum_{i,j}w_k(i,j)\,x(i,j),\\
+\hat\sigma^2_k&=\tfrac{1}{N_k}\textstyle\sum_{i,j}w_k(i,j)\,\bigl(x(i,j)-\hat\mu_k\bigr)^2 .
+\end{aligned}
+\label{eq:stats}
+\end{equation}
+
+\textbf{Shrinkage.} In deep layers, small structures cover few positions, so these estimates are noisy; a tiny cup may cover only a handful of positions. We therefore combine them with the source class statistics:
+\begin{equation}
+\tilde\mu_k=\gamma_k\hat\mu_k+(1-\gamma_k)\mu^{\src}_k,\quad
+\gamma_k=\frac{N_k}{N_k+\kappa_\mu},
+\label{eq:shrinkmu}
+\end{equation}
+\begin{equation}
+\tilde\sigma^2_k=\eta_k\hat\sigma^2_k+(1-\eta_k)\sigma^{2,\src}_k,\quad
+\eta_k=\frac{(N_k-1)_+}{(N_k-1)_+ +\kappa_\sigma}.
+\label{eq:shrinkvar}
+\end{equation}
+The pseudo-counts $\kappa_\mu$ and $\kappa_\sigma$ are measured in feature positions: they state how many target positions the source estimate is worth \textbf{(how to decide that?)} (set once via conjugate Bayesian priors on source validation data, $\kappa_\mu=8, \kappa_\sigma=16$, and held fixed). The variance uses $N_k-1$, because a variance needs at least two samples. A large class uses its own target statistics, and a small class moves toward its source statistics \textbf{(What do you mean by large and small classes?)} (large means $N_k \gg \kappa$ like background; small means $N_k \ll \kappa$ like tiny bottleneck structures). An absent class ($N_k=0$) gets $\gamma_k=\eta_k=0$, so the undefined estimates in Eq.~(\ref{eq:stats}) are never used. Shrinkage also bounds pseudo-label errors: a wrong or empty mask can only pull a class back toward its source statistics.
+
+\textbf{Prior matching.} We recombine the class statistics as in Eq.~(\ref{eq:decomp}), but with the source proportions:
+\begin{equation}
+\mu_{\PM}=\sum_k\pi^{\src}_k\tilde\mu_k,\quad
+\sigma^2_{\PM}=\sum_k\pi^{\src}_k\tilde\sigma^2_k
++\sum_k\pi^{\src}_k(\tilde\mu_k-\mu_{\PM})^2 .
+\label{eq:pm}
+\end{equation}
+This gives a simple guarantee \textbf{(of what?)} (guarantee of label-proportion invariance under pure anatomical size shifts):
+
+\begin{proposition}[Label-proportion invariance]\label{prop:inv} $(\mu_{\PM},\sigma^2_{\PM})$ does not depend on the target proportions $\pi^{\mathrm{tgt}}$. If the class statistics also match the source, it equals the pooled source statistics.
+\end{proposition}
+
+Eq.~(\ref{eq:pm}) weights the classes by $\pi^{\src}$ only, which gives the first part. Substituting the source class statistics gives Eq.~(\ref{eq:decomp}) evaluated on the source, i.e.\ the pooled source statistics; these equal the BN running statistics up to the Phase-0 estimation error. AdaBN instead computes $\sum_k\pi^{\mathrm{tgt}}_k\mu_k$, which moves with the target proportions whenever the class means differ. Any remaining difference between $(\mu_{\PM},\sigma^2_{\PM})$ and the source statistics is therefore appearance shift \textbf{(So what to do with that?)} (which we quantify via 2-Wasserstein distance to gate per-channel adaptation).
+
+% Table 1 is defined here so it floats to the top of the Results page
+\begin{table*}[t]
+\centering
+\caption{Results at $B{=}1$, mean of three seeds: Dice / Jaccard (\%), fundus disc / cup Dice (\%). $\alpha$-BN$^\star$: oracle with $\alpha\in\{0.1,\dots,0.9\}$
+chosen per target \emph{using target labels} (subscript: $\alpha$). PMSA-BN's gain over the best baseline is positive in every seed (mean seed std 0.04).
+$^\dagger$Automatic reference contours.}
+\label{tab:main}
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\renewcommand{\arraystretch}{0.92}
+\begin{tabular}{lrcccccc}
+\toprule
+Transfer (source $\to$ target) & $n$ & Source Only & TENT & AdaBN & $\alpha$-BN (0.5) & $\alpha$-BN$^\star$ (oracle) & PMSA-BN (ours)\\
+\midrule
+\multicolumn{8}{l}{\emph{Chest X-ray (Dice / Jaccard)}}\\
+ Montgomery $\to$ Shenzhen & 336 & 94.40 / 89.65 & 93.91 / 88.77 & 93.86 / 88.66 & 94.40 / 89.63 & 94.43$_{.3}$ / 89.69$_{.3}$ & \B{94.69} / \B{90.13} \\
+ Shenzhen $\to$ Montgomery & 138 & 97.29 / 94.78 & 95.85 / 92.51 & 95.87 / 92.48 & 97.08 / 94.43 & 97.34$_{.1}$ / 94.88$_{.1}$ & \B{97.44} / \B{95.06} \\
+ Montgomery $\to$ JSRT & 247 & 96.56 / 93.37 & 95.73 / 91.86 & 95.58 / 91.58 & 96.44 / 93.15 & 96.56$_{.1}$ / 93.37$_{.1}$ & \B{96.63} / \B{93.51} \\
+ Montgomery $\to$ COVID-QU-Ex & 300 & 92.62 / 86.69 & 92.49 / 86.40 & 92.30 / 86.06 & 92.69 / 86.77 & 92.69$_{.5}$ / 86.78$_{.3}$ & \B{93.60} / \B{88.26} \\
+\midrule
+\multicolumn{8}{l}{\emph{Colonoscopy (Dice / Jaccard)}}\\
+ Kvasir $\to$ ClinicDB & 612 & 81.28 / 72.84 & 70.41 / 60.82 & 69.92 / 60.12 & 80.28 / 70.81 & 81.79$_{.3}$ / 72.95$_{.1}$ & \B{83.02} / \B{73.95} \\
+ ClinicDB $\to$ Kvasir & 200 & 81.33 / 73.19 & 80.00 / 72.10 & 79.03 / 70.34 & 83.09 / 75.31 & 83.09$_{.5}$ / 75.31$_{.5}$ & \B{83.21} / \B{75.45} \\
+ Kvasir $\to$ ETIS-Larib & 196 & 62.42 / 53.81 & 38.12 / 30.35 & 37.66 / 29.75 & 60.29 / 50.32 & 64.05$_{.3}$ / 54.45$_{.1}$ & \B{65.91} / \B{56.22} \\
+ ClinicDB $\to$ ETIS-Larib & 196 & 57.82 / 47.61 & 50.34 / 41.60 & 49.03 / 39.79 & 61.02 / 50.27 & 61.02$_{.5}$ / 50.27$_{.5}$ & \B{61.49} / \B{50.90} \\
+\midrule
+\multicolumn{8}{l}{\emph{Dermoscopy (Dice / Jaccard)}}\\
+ ISIC18 $\to$ PH$^2$ & 200 & 90.70 / 83.65 & 85.95 / 76.65 & 85.63 / 76.16 & 89.04 / 81.20 & 90.59$_{.1}$ / 83.47$_{.1}$ & \B{90.75} / \B{83.71} \\
+ ISIC18 $\to$ HAM10000 & 500 & 89.88 / 83.11 & 80.07 / 68.86 & 79.34 / 67.90 & 89.20 / 82.19 & 90.15$_{.1}$ / 83.46$_{.1}$ & \B{90.45} / \B{84.31} \\
+ ISIC18 $\to$ Derm7pt$^\dagger$ & 500 & 43.01 / 34.32 & 43.23 / 33.06 & 43.10 / 32.86 & 42.42 / 33.45 & 42.88$_{.1}$ / 34.10$_{.1}$ & \B{44.28} / \B{34.50} \\
+ PH$^2$ $\to$ ISIC18 & 600 & 87.53 / 81.10 & 78.19 / 69.55 & 78.66 / 70.08 & 87.66 / 80.87 & 87.84$_{.3}$ / 81.30$_{.1}$ & \B{87.96} / \B{81.56} \\
+\midrule
+\multicolumn{8}{l}{\emph{Fundus (optic disc / optic cup Dice)}}\\
+ REFUGE $\to$ ORIGA      & 325 & 87.63 / 79.38 & 88.15 / 81.90 & 87.48 / 80.59 & 88.75 / 80.96 & 88.75$_{.5}$ / 81.08$_{.7}$ & \B{89.20} / \B{82.48} \\
+ REFUGE $\to$ Drishti-GS &  50 & 95.63 / 78.61 & 95.64 / 74.92 & 95.55 / 75.53 & 96.08 / 78.30 & 96.08$_{.5}$ / 78.62$_{.1}$ & \B{96.51} / \B{81.04} \\
+ REFUGE $\to$ RIM-ONE r3 & 159 & 45.13 / 34.22 & 54.62 / 40.94 & 53.89 / 41.00 & 55.14 / 42.73 & 58.23$_{.7}$ / 44.77$_{.7}$ & \B{60.77} / \B{44.94} \\
+ REFUGE $\to$ PAPILA     &  99 & 54.59 / 45.69 & 88.32 / 61.61 & 88.06 / 60.95 & 72.89 / 56.29 & 86.54$_{.9}$ / 60.85$_{.9}$ & \B{88.69} / \B{61.73} \\
+ ORIGA $\to$ REFUGE      & 400 & 88.12 / 71.45 & 89.24 / 73.80 & 89.05 / 73.21 & 90.15 / 74.90 & 90.62$_{.7}$ / 75.84$_{.7}$ & \B{92.34} / \B{79.15} \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\textbf{Shift-adaptive mixing.} For each channel, we measure the shift between
+$\mathcal N(\mu_{\PM,c},\sigma^2_{\PM,c})$ and
+$\mathcal N(\mu^{\src}_c,\sigma^{2,\src}_c)$. We use their squared
+2-Wasserstein distance, normalized by the source variance, and turn it into a
+mixing weight:
+\begin{equation}
+D_c=\frac{(\mu_{\PM,c}-\mu^{\src}_c)^2+(\sigma_{\PM,c}-\sigma^{\src}_c)^2}
+{\sigma^{2,\src}_c+\epsilon},\qquad
+\alpha_c=1-e^{-D_c/\tau}.
+\label{eq:w2}
+\end{equation}
+Unlike the KL divergence, $D_c$ never divides by the target variance, so it stays finite when a target channel is nearly constant. Normalizing by the source variance makes it invariant to rescaling a channel, so wide and narrow channels are compared fairly; $\epsilon$ protects near-dead channels. The weight $\alpha_c\in[0,1)$ grows with $D_c$. An unshifted channel keeps its source statistics ($\alpha_c\approx0$), and a strongly shifted channel adopts the target statistics ($\alpha_c\to1$). One temperature $\tau$ \textbf{(tau used earlier for thresholding)} (resolved: pseudo-mask thresholds are now designated $\theta_{hi}, \theta_{lo}$) controls the transition for all channels. A single global $\alpha$ cannot do this: the best $\alpha$ of $\alpha$-BN ranges from 0.1 to 0.9 across our targets (Table~\ref{tab:main}). The layer then normalizes its input with the mixed statistics and its unchanged affine parameters:
+\begin{equation}
+\hat\mu_c=\alpha_c\mu_{\PM,c}+(1-\alpha_c)\mu^{\src}_c,\quad
+\hat\sigma^2_c=\alpha_c\sigma^2_{\PM,c}+(1-\alpha_c)\sigma^{2,\src}_c,
+\label{eq:mix}
+\end{equation}
+\begin{equation}
+y_c=\gamma^{BN}_c\,\frac{x_c-\hat\mu_c}{\sqrt{\hat\sigma^2_c+\epsilon_{BN}}}+\beta^{BN}_c .
+\label{eq:bn}
+\end{equation}
+As in $\alpha$-BN, we mix means and variances linearly; mixing variances rather than standard deviations is consistent with Eq.~(\ref{eq:pm}).
+
+\textbf{Prediction and cost.} The segmentation is the arg max of the second pass. Statistics are reset after every image, so errors cannot build up across images. If target and source match, $D_c\approx0$ and $\alpha_c\approx0$, so the model is unchanged; on held-out source images, PMSA-BN changed Dice by less than 0.002, with mean
+$\alpha\approx0.01$. The method needs no backpropagation and costs one extra forward pass: about 25\,ms per $384^2$ image, against 13\,ms for the source model (one pass) and 284\,ms for TENT (10 forward--backward steps; ResNet-34, RTX~3050).
+
+% ==========================================================================
+\section{Experiments}
+\label{sec:exp}
+
+\textbf{Transfers.} We evaluate 17 source$\to$target transfers (Table~\ref{tab:main}). \emph{Fundus} (optic disc and cup): REFUGE~\cite{orlando2020refuge} to
+Drishti-GS~\cite{sivaswamy2014drishti}, ORIGA~\cite{zhang2010origa}, RIM-ONE r3~\cite{fumero2011rimone} and PAPILA~\cite{kovalyk2022papila}.\emph{Colonoscopy} (polyp): Kvasir-SEG~\cite{jha2020kvasir}, CVC-ClinicDB~\cite{bernal2015clinicdb} and ETIS-Larib~\cite{silva2014etis}. \emph{Chest X-ray} (lungs): Montgomery and Shenzhen~\cite{jaeger2014cxr}, JSRT~\cite{shiraishi2000jsrt} and COVID-QU-Ex~\cite{tahir2021covidquex}. \emph{Dermoscopy} (lesion): ISIC~2018~\cite{codella2019isic}, PH$^2$~\cite{mendonca2013ph2}, HAM10000~\cite{tschandl2018ham} and Derm7pt~\cite{kawahara2019derm7pt}. Targets are full datasets, official test splits (ORIGA, Drishti-GS, Kvasir) or fixed deterministic subsets of large cohorts; full-cohort results differ by $<0.007$.
+
+\textbf{Implementation.} U-Net with an ImageNet-pretrained ResNet-34 encoder (46 BN layers), cross-entropy + soft Dice loss, AdamW (weight decay $10^{-5}$), cosine
+schedule and early stopping on source validation Dice. Input size / learning rate / epochs: $384^2$/$10^{-4}$/60 (fundus), $352^2$/$10^{-4}$/50 (colonoscopy), $320^2$/$3{\times}10^{-4}$/50 (dermoscopy), $256^2$/$3{\times}10^{-4}$/30 (chest X-ray). Shared TTA settings: $\tau_{hi}/\tau_{lo}=0.9/0.1$, $\kappa_\mu/\kappa_\sigma=8/16$, $\epsilon=10^{-5}$, two passes. $\tau$ is chosen per source domain without target data, from $\{0.1,0.3,0.5,1,2,3,10\}$ on color/intensity-perturbed copies of the source validation set, as the most adaptive value whose clean validation Dice stays within $0.003$ of the source model: $0.5$ (REFUGE, Montgomery, Shenzhen), $1$ (Kvasir, ClinicDB), $2$ (ISIC), $10$ (PH$^2$, 40 validation images). For dermoscopy, source proportions exclude the vignette
+border.
+
+\textbf{Protocol.} Episodic adaptation at $B{=}1$. Baselines: Source Only; TENT~\cite{wang2021tent} (10 Adam steps, lr $10^{-4}$, entropy loss on BN affine parameters, reset per image); AdaBN; $\alpha$-BN ($\alpha=0.5$); and the oracle $\alpha$-BN$^\star$, whose $\alpha\in\{0.1,\dots,0.9\}$ is chosen per target \emph{with target labels}, an upper bound unavailable in deployment. No other method sees target labels. Results are means over three seeds; significance uses paired $t$- and Wilcoxon signed-rank tests on per-image Dice of the same images (Wilcoxon because Dice is skewed).
+
+% Result floats, defined here so they appear with the Results
+\begin{table}[!htb]
+\centering
+\caption{MobileNetV2 ($B{=}1$, three seeds): best baseline (T: TENT, A: AdaBN, $\alpha^\star_{x}$: oracle) vs.\ PMSA-BN, same metrics as Table~\ref{tab:main}.}
+\label{tab:mbv2}
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{lcc}
+\toprule
+Transfer & Best baseline & PMSA-BN\\
+\midrule
+\multicolumn{3}{l}{\emph{Chest X-ray}}\\
+ Mont.$\to$Shenzhen & 94.12 / 89.16 ($\alpha^\star_{.1}$) & \B{94.36} / \B{89.54} \\
+ Shenzhen$\to$Mont. & 96.36 / 93.14 ($\alpha^\star_{.3}$) & \B{96.88} / \B{94.03} \\
+ Mont.$\to$JSRT & 96.69 / 93.61 ($\alpha^\star_{.1}$) & \B{96.77} / \B{93.76} \\
+ Mont.$\to$COVID & 91.95 / 85.71 ($\alpha^\star_{.3}$) & \B{93.17} / \B{87.60} \\
+\midrule
+\multicolumn{3}{l}{\emph{Colonoscopy}}\\
+ Kvasir$\to$ClinicDB & 41.60 / 30.63 ($\alpha^\star_{.9}$) & \B{42.83} / \B{31.64} \\
+ ClinicDB$\to$Kvasir & 74.91 / 64.11 ($\alpha^\star_{.5}$) & \B{75.24} / \B{64.56} \\
+ Kvasir$\to$ETIS & 26.34 / 18.25 ($\alpha^\star_{.9}$) & \B{26.47} / \B{18.39} \\
+ ClinicDB$\to$ETIS & 42.05 / 31.98 ($\alpha^\star_{.5}$) & \B{47.03} / \B{36.47} \\
+\midrule
+\multicolumn{3}{l}{\emph{Dermoscopy}}\\
+ ISIC$\to$PH$^2$ & 91.35 / 85.08 ($\alpha^\star_{.1}$) & \B{91.65} / \B{85.09} \\
+ ISIC$\to$HAM & 88.16 / 80.94 ($\alpha^\star_{.1}$) & \B{88.27} / \B{81.11} \\
+ ISIC$\to$Derm7pt & 46.45 / 37.50 ($\alpha^\star_{.5}$) & \B{47.61} / \B{38.25} \\
+ PH$^2$$\to$ISIC & 84.36 / 76.49 ($\alpha^\star_{.3}$) & \B{84.56} / \B{76.69} \\
+\midrule
+\multicolumn{3}{l}{\emph{Fundus (REFUGE source)}}\\
+ $\to$ORIGA      & 89.74 (T) / 78.08 ($\alpha^\star_{.3}$) & \B{89.78} / \B{78.09} \\
+ $\to$Drishti-GS & 89.98 ($\alpha^\star_{.5}$) / 58.06 (A) & \B{91.31} / \B{63.11} \\
+ $\to$RIM-ONE r3 & 66.53 / 40.81 ($\alpha^\star_{.9}$)     & \B{75.17} / \B{52.62} \\
+ $\to$PAPILA     & 76.23 / 52.38 (A)                        & \B{82.69} / \B{56.50} \\
+ ORIGA$\to$REFUGE& 89.10 ($\alpha^\star_{.5}$) / 73.60 ($\alpha^\star_{.5}$) & \B{91.02} / \B{77.80} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\IfFileExists{fig_plot.pdf}%
+  {\includegraphics[width=\linewidth,height=5.2cm,keepaspectratio]{fig_plot.pdf}}%
+  {\IfFileExists{fig_plot.png}%
+    {\includegraphics[width=\linewidth,height=5.2cm,keepaspectratio]{fig_plot.png}}%
+    {\includegraphics[width=\linewidth,height=5.2cm]{example-image}}}
+\caption{Batch-size sensitivity across three modalities ($\Delta$Dice). AdaBN fails at $B{=}1$, whereas PMSA-BN maintains complete invariance.}
+\label{fig:plot}
+\end{figure}
+
+\begin{table}[!htb]
+\centering
+\caption{Ablation (Dice, single seed); each row adds one component.
+$^\ddagger$Optic cup, MobileNetV2.}
+\label{tab:abl}
+\footnotesize
+\setlength{\tabcolsep}{2.5pt}
+\begin{tabular}{lccc}
+\toprule
+Configuration & PH$^2\!\to$ISIC & CDB$\to$Kvasir & Drishti cup$^\ddagger$\\
+\midrule
+Source Only & .861 & .839 & .529\\
+AdaBN & .758 & .820 & .581\\
++ class-cond.\ stats, target prop. & .687 & .789 & .094\\
++ prior matching & .763 & .812 & .561\\
++ shrinkage & .765 & .818 & .619\\
++ per-channel $\alpha$ (full PMSA-BN) & \B{.864} & \B{.841} & \B{.627}\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% --------------------------------------------------------------------------
+\section{Results}
+\label{sec:results}
+
+\textbf{Main comparison.} PMSA-BN has the highest mean on all 17 transfers and every metric (Table~\ref{tab:main}), including against the label-tuned
+$\alpha$-BN$^\star$. At $B{=}1$, AdaBN falls below Source Only on 13 transfers, TENT on 11 and fixed $\alpha$-BN on 7 (e.g.\ ETIS-Larib $62.4\to37.7$/$38.1$);
+PMSA-BN never does. Unlike AdaBN, it does not need larger batches (Fig.~\ref{fig:plot}).
+
+\textbf{Significance Tests.} PMSA-BN is significantly better ($p<0.01$, paired $t$) than the \emph{strongest} baseline on 9 of 17 transfers ($p$ down to $10^{-22}$) and at $p<0.05$ on two more; it beats AdaBN significantly on 15 of 17 cases. Gains are largest under strong shift (PAPILA disc $+34.1$ over Source Only).
+
+\textbf{Backbone generalization.} With a MobileNetV2 encoder (same protocol), PMSA-BN also beats the best baseline on all 17 transfers and both metrics (Table~\ref{tab:mbv2}), by up to $+8.6$/$+11.8$ disc/cup on RIM-ONE.
+
+% --------------------------------------------------------------------------
+
+\textbf{Ablation.} On all three transfers (Table~\ref{tab:abl}), class-conditional statistics with \emph{target} proportions are worse than AdaBN (the Drishti-GS cup collapses to .094); prior matching recovers this loss. Shrinkage adds $+.058$ on the tiny optic cup and $+.041$ on Kvasir$\to$ETIS (MobileNetV2), but ${\le}.006$ on large lesions, where $N_k\gg\kappa$. Per-channel mixing gives the final gain and lifts the large-lesion transfers above Source Only. Over all 27 settings of
+$\kappa_\mu\in\{4,8,16\}$, $\kappa_\sigma\in\{8,16,32\}$ and $\tau_{hi}\in\{0.8,0.9,0.95\}$, Dice varies by ${\le}0.008$. Ground-truth masks instead of pseudo-masks gain only .006, and an AdaBN pass~1 loses .007.
+
+\textbf{Limitations.} PMSA-BN requires BN layers (it does not apply directly to InstanceNorm networks such as nnU-Net), a one-time labeled pass over the source data, and usable pass-1 pseudo-masks. Gains are modest when the source model is already strong.
+
+% ==========================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+PMSA-BN separates appearance shift (how a structure looks) from label-proportion shift (how much of the image it occupies) inside every BN layer. Training-free, stable at $B{=}1$ and free of per-site tuning, it outperformed all baselines, including TENT and a label-tuned $\alpha$-BN oracle, on 17 transfers in four image modalities without degrading the source model, making it a safe drop-in default for images that arrive one at a time. Future work will extend it to InstanceNorm and 3D networks and use $D_c$ as a per-image shift score to flag unreliable predictions for clinical review.
+
+% ==========================================================================
+% --- Page 5 may contain ONLY the following sections and references --------
+\section{Compliance with ethical standards}
+\label{sec:ethics}
+Open-access data; no ethical approval was required.
+
+\section{Acknowledgments}
+\label{sec:ack}
+% TODO before submission: confirm there was no funding and no conflict of interest.
+No funding was received; the authors declare no conflicts of interest.
+
+% Compact reference list: smaller font, no extra gap between entries
+\let\oldthebibliography\thebibliography
+\renewcommand{\thebibliography}[1]{\oldthebibliography{#1}%
+  \setlength{\itemsep}{0pt}\setlength{\parsep}{0pt}}
+{\footnotesize
+\bibliographystyle{IEEEbib}
+\bibliography{refs}}
+
+\end{document}
+
+
+sir has raised some other questions intext textbf check and give me detailed answers to give
+</USER_REQUEST>
+<ADDITIONAL_METADATA>
+The current local time is: 2026-10-29T19:13:48+05:30.
+</ADDITIONAL_METADATA>
