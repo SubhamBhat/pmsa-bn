@@ -1,0 +1,97 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{xcolor}
+\usepackage{tcolorbox}
+\usepackage{hyperref}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    urlcolor=blue
+}
+
+\tcbset{
+    colback=blue!5!white,
+    colframe=blue!75!black,
+    fonttitle=\bfseries,
+    arc=3mm
+}
+
+\title{\textbf{Clarification on Pseudo-Count Shrinkage}\\
+\large Geometric Downsampling vs. Statistical Shrinkage in PMSA-BN}
+\author{\textbf{Subham Bhat}, \textbf{Aritra Dutta}\\
+Department of Computer Science and Engineering, Jadavpur University}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+A terminology confusion exists between two completely different concepts of the word \textbf{``shrinkage''}:
+
+\begin{itemize}
+    \item \textbf{Spatial (Geometric) Shrinkage:} Downsampling/resizing an image or mask to match the feature map dimensions as the network gets deeper ($256 \times 256 \to 128 \times 128 \to \dots \to 8 \times 8$).
+    \item \textbf{Statistical Shrinkage (James-Stein / Empirical Bayes):} Pulling a noisy sample estimator $(\hat{\mu}_k, \hat{\sigma}^2_k)$ toward a trusted prior $(\mu_k^{\mathrm{src}}, \sigma_k^{2,\mathrm{src}})$ when sample size is too small.
+\end{itemize}
+
+\begin{tcolorbox}
+In fact, it is precisely because the mask shrinks geometrically that statistical shrinkage is required!
+\end{tcolorbox}
+
+\section{What Happens When the Mask Shrinks Geometrically?}
+
+Take an eye fundus image ($256 \times 256 = 65{,}536$ pixels) with a tiny optic cup or lesion covering just $0.2\%$ of the image ($\approx 130$ pixels):
+
+\begin{itemize}
+    \item \textbf{At Input / Shallow Layers ($256 \times 256$):}\\
+    The mask has $\approx 130$ pixels. That is enough to compute a reasonable sample mean and variance.
+    
+    \item \textbf{At Bottleneck / Deep Layers ($8 \times 8 = 64$ total positions):}\\
+    Because the mask downsamples proportionately with the feature map, the optic cup now covers:
+    \begin{equation}
+        64 \times 0.2\% \approx \mathbf{0.13 \text{ to } 1 \text{ feature cell!}}
+    \end{equation}
+    The effective pixel count $N_k$ at this deep layer drops to $N_k \le 1$.
+\end{itemize}
+
+\section{The Mathematical Disaster at $N_k \le 1$}
+
+When the downsampled mask has only $N_k = 0$ or $1$ position:
+
+\begin{enumerate}
+    \item \textbf{Sample Variance is Undefined (Division by Zero):}
+    \begin{equation}
+        \hat{\sigma}^2_k = \frac{1}{N_k - 1} \sum_{i} (x_i - \hat{\mu}_k)^2
+    \end{equation}
+    If $N_k = 1$, the denominator $N_k - 1 = 0$. The sample variance cannot be computed (division by zero). If computed with $N_k$, $\hat{\sigma}^2_k = 0$.
+    
+    \item \textbf{Batch Normalization Explodes:}
+    \begin{equation}
+        y = \gamma \frac{x - \hat{\mu}}{\sqrt{\hat{\sigma}^2 + \epsilon}} + \beta
+    \end{equation}
+    If $\hat{\sigma}^2 \approx 0$, the activation is divided by $\sqrt{10^{-5}} \approx 0.003$, magnifying feature noise by over \textbf{$300\times$}. In our ablation experiment, this caused activations to blow up and the optic cup Dice score collapsed catastrophically from \textbf{0.581 to 0.094}.
+\end{enumerate}
+
+\section{How Statistical Shrinkage Solves It}
+
+Statistical shrinkage (grounded in conjugate Bayesian priors) uses pseudo-counts $\kappa_\mu = 8, \kappa_\sigma = 16$:
+
+\begin{equation}
+    \tilde{\mu}_k = \frac{N_k \hat{\mu}_k + \kappa_\mu \mu_k^{\mathrm{src}}}{N_k + \kappa_\mu}, \qquad 
+    \tilde{\sigma}^2_k = \frac{(N_k - 1)_+ \hat{\sigma}^2_k + \kappa_\sigma \sigma_k^{2,\mathrm{src}}}{(N_k - 1)_+ + \kappa_\sigma}
+\end{equation}
+
+\begin{itemize}
+    \item \textbf{For Large Classes (e.g., Background, $N_{\mathrm{bg}} \gg \kappa$):}
+    \begin{equation}
+        \frac{N_{\mathrm{bg}}}{N_{\mathrm{bg}} + \kappa} \to 1.
+    \end{equation}
+    The model adapts fully to the target image.
+    
+    \item \textbf{For Tiny Classes at Bottlenecks ($N_{\mathrm{cup}} \le 1 \ll \kappa$):}\\
+    The target weight drops to $0$, and the formula smoothly and safely pulls the statistics back to the rock-solid source prior $\sigma_k^{2,\mathrm{src}}$. No division by zero, no variance explosion, and no prediction collapse.
+\end{itemize}
+
+\end{document}
