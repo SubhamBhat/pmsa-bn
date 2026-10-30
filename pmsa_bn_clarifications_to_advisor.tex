@@ -1,0 +1,146 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{tcolorbox}
+\usepackage{hyperref}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+\tcbset{
+    colback=blue!5!white,
+    colframe=blue!75!black,
+    fonttitle=\bfseries,
+    arc=4mm
+}
+
+\title{\textbf{Technical Clarifications for Advisor Review}\\
+\large Prior-Matched, Shift-Adaptive Batch Normalization (PMSA-BN)}
+\author{\textbf{Subham Bhat}, \textbf{Aritra Dutta}\\
+Department of Computer Science and Engineering, Jadavpur University}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This document provides standalone mathematical, architectural, and statistical justifications for two recent queries raised during manuscript review: (1)~the exact mathematical necessity of pseudo-count statistical shrinkage versus geometric mask downsampling, and (2)~the formal derivation and semantic meaning of the class-variance decomposition formula in Eq.~(1).
+\end{abstract}
+
+\vspace{1em}
+
+% =========================================================================
+\section{Query 1: Why Pseudo-Count Shrinkage When the Mask Already Shrinks Proportionately with Image Dimensions?}
+% =========================================================================
+
+\subsection{The Core Distinction: Geometric Resizing vs. Statistical Shrinkage}
+The terminology ``shrinkage'' has two distinct meanings in computer vision and statistics:
+\begin{enumerate}
+    \item \textbf{Geometric / Spatial Shrinkage (Downsampling):} The reduction of spatial grid resolution as feature maps pass through pooling and strided convolution layers (e.g., $256 \times 256 \to 128 \times 128 \to \dots \to 8 \times 8$).
+    \item \textbf{Statistical Shrinkage (James-Stein / Bayesian Shrinkage):} Regularizing a high-variance sample estimator ($\hat{\mu}_k, \hat{\sigma}^2_k$) by shrinking it toward an informative prior ($\mu_k^{\mathrm{src}}, \sigma_k^{2,\mathrm{src}}$) when the effective sample size $N_k$ is critically small.
+\end{enumerate}
+
+\begin{tcolorbox}[title=Key Insight]
+Statistical shrinkage is not an alternative to spatial downsampling; \textbf{it is mathematically required precisely because spatial downsampling occurs.}
+\end{tcolorbox}
+
+\subsection{The Small-Sample Catastrophe at Deep Bottleneck Layers}
+Consider a high-resolution input image ($256 \times 256 = 65{,}536$ pixels) containing a fine anatomical structure (such as an optic cup or a diminutive polyp) occupying $0.2\%$ of the image area ($\approx 130$ pixels):
+\begin{itemize}
+    \item \textbf{Shallow Layers ($256 \times 256$ or $128 \times 128$):} The structure covers over 100 spatial feature positions. The sample mean and sample variance can be estimated with reasonable empirical stability.
+    \item \textbf{Deep Bottleneck Layers ($8 \times 8 = 64$ total positions):} Because the mask downsamples proportionately with the feature map resolution, the expected spatial footprint at the bottleneck becomes:
+    \begin{equation}
+        N_k = 64 \times 0.002 \approx \mathbf{0.13 \text{ to } 1 \text{ feature cell}}.
+    \end{equation}
+\end{itemize}
+
+When $N_k \le 1$ at single-image test-time adaptation ($B=1$), standard empirical estimation collapses:
+\begin{enumerate}
+    \item \textbf{Unbiased Sample Variance Divergence / Division by Zero:}
+    \begin{equation}
+        \hat{\sigma}^2_k = \frac{1}{N_k - 1} \sum_{i,j} w_k(i,j)\left(Z(i,j) - \hat{\mu}_k\right)^2
+    \end{equation}
+    When $N_k = 1$, the denominator $N_k - 1 = 0$, rendering the variance \textbf{undefined} (division by zero). If estimated with $N_k$ in the denominator, the variance is trivially $\hat{\sigma}^2_k = 0$.
+    \item \textbf{Estimator Variance Explosion:} Even when $N_k = 2$ or $3$, the variance of the sample variance estimator is given by:
+    \begin{equation}
+        \mathrm{Var}(\hat{\sigma}^2_k) = \frac{2\sigma^4}{N_k - 1} \xrightarrow{N_k \to 1} \infty.
+    \end{equation}
+    \item \textbf{Batch Normalization Activation Blow-Up:} Standard BN normalizes activations via:
+    \begin{equation}
+        y = \gamma \frac{x - \mu}{\sqrt{\sigma^2 + \epsilon}} + \beta.
+    \end{equation}
+    If $\sigma^2 \approx 0$, features are amplified by $\frac{1}{\sqrt{\epsilon}} = \frac{1}{\sqrt{10^{-5}}} \approx 316\times$, causing severe numerical instability and NaN values. In our empirical ablation on the optic cup, omitting shrinkage caused Dice to collapse from \textbf{0.581 to 0.094}.
+\end{enumerate}
+
+\subsection{The Conjugate Bayesian Solution}
+PMSA-BN regularizes empirical moments via Normal-Inverse-Gamma conjugate pseudo-counts $\kappa_\mu = 8$ and $\kappa_\sigma = 16$:
+\begin{equation}
+    \tilde{\mu}_k = \frac{N_k \hat{\mu}_k + \kappa_\mu \mu_k^{\mathrm{src}}}{N_k + \kappa_\mu}, \qquad 
+    \tilde{\sigma}^2_k = \frac{(N_k - 1)_+ \hat{\sigma}^2_k + \kappa_\sigma \sigma_k^{2,\mathrm{src}}}{(N_k - 1)_+ + \kappa_\sigma}.
+\end{equation}
+\begin{itemize}
+    \item \textbf{Dominant Classes ($N_k \gg \kappa$, e.g., Background):} $\frac{N_k}{N_k + \kappa} \to 1$, fully adapting to the target distribution.
+    \item \textbf{Vanishing Structures ($N_k \le 1 \ll \kappa$, Bottleneck):} Target weight smoothly drops to $0$, and the estimator safely reverts to the stable source prior $\sigma_k^{2,\mathrm{src}}$, eliminating variance collapse.
+\end{itemize}
+
+\vspace{2em}
+
+% =========================================================================
+\section{Query 2: Why Is the Variance Formula Summing Over $k$ (Classes vs. Channels)?}
+% =========================================================================
+
+\subsection{Clarification of Indices: $k$ vs. $c$}
+The index $k$ in Eq.~(1) denotes \textbf{semantic anatomical classes}, NOT feature channels:
+\begin{itemize}
+    \item $k \in \{1, 2, \dots, K\}$ indexes disjoint semantic regions (e.g., $k=1$: Background, $k=2$: Optic Disc Rim, $k=3$: Optic Cup).
+    \item $c \in \{1, 2, \dots, C\}$ indexes the feature channels.
+\end{itemize}
+
+\begin{tcolorbox}[title=Important Architectural Detail]
+Channels are \textbf{never mixed or summed over} in Eq.~(1). The formula is evaluated \textbf{strictly independently for each individual channel $c$}. The subscript $c$ was suppressed in the manuscript solely to avoid notation clutter.
+\end{tcolorbox}
+
+With explicit channel indices restored, the equation reads:
+\begin{equation}
+    \sigma_c^2 = \sum_{k=1}^K \pi_k \sigma_{c,k}^2 + \sum_{k=1}^K \pi_k \left(\mu_{c,k} - \mu_c\right)^2.
+\end{equation}
+
+\subsection{Mathematical Derivation: The Law of Total Variance}
+Let random variable $X$ denote the activation values within channel $c$, and let discrete random variable $Y \in \{1, \dots, K\}$ denote the class assignment of each spatial position with prior probability $P(Y = k) = \pi_k$.
+
+By the \textbf{Law of Total Variance} (also known as \emph{Eve's Law} or the \emph{ANOVA variance decomposition}):
+\begin{equation}
+    \mathrm{Var}(X) = \mathbb{E}\left[\mathrm{Var}(X \mid Y)\right] + \mathrm{Var}\left(\mathbb{E}[X \mid Y]\right).
+\end{equation}
+
+Evaluating both terms yields:
+\begin{enumerate}
+    \item \textbf{Expected Conditional Variance (Within-Class Variance):}
+    \begin{equation}
+        \mathbb{E}\left[\mathrm{Var}(X \mid Y)\right] = \sum_{k=1}^K P(Y=k) \mathrm{Var}(X \mid Y=k) = \sum_{k=1}^K \pi_k \sigma_{c,k}^2.
+    \end{equation}
+    This measures the average internal activation spread within each individual anatomical tissue.
+    \item \textbf{Variance of Conditional Expectation (Between-Class Variance):}
+    \begin{align}
+        \mathrm{Var}\left(\mathbb{E}[X \mid Y]\right) &= \sum_{k=1}^K P(Y=k)\left(\mathbb{E}[X \mid Y=k] - \mathbb{E}[X]\right)^2 \nonumber \\
+        &= \sum_{k=1}^K \pi_k \left(\mu_{c,k} - \mu_c\right)^2.
+    \end{align}
+    This measures the activation variance arising from the contrast difference between distinct anatomical classes.
+\end{enumerate}
+
+Adding both terms yields the total pooled variance $\sigma_c^2$ of channel $c$ across all spatial locations.
+
+\subsection{Why This Decomposition Is Fundamental to PMSA-BN}
+Traditional AdaBN computes pooled sample variance $\sigma^2_{\mathrm{AdaBN}}$ across all pixels. If the target patient has an unusually small tumor ($\pi_{\mathrm{tumor}} \downarrow$), the between-class variance term $\sum_k \pi_k (\mu_k - \mu)^2$ alters $\sigma^2$ even when the physical appearance and scanner contrast of both tissues ($\mu_k, \sigma_k^2$) have not changed at all. 
+
+By decomposing the variance into class-conditional moments, PMSA-BN recombines $(\mu_k, \sigma_k^2)$ with the \textbf{source priors} $\pi_k^{\mathrm{src}}$, provably decoupling scanner appearance shift from inter-patient anatomical size variations (Proposition~1).
+
+\end{document}
