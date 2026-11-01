@@ -26,7 +26,7 @@ PMSA-BN adapts the batch-normalization (BN) statistics of a trained segmentation
 3. [Bayesian shrinkage in depth](#3-bayesian-shrinkage-in-depth)
 4. [Why PMSA-BN beats AdaBN, α-BN and TENT](#4-why-pmsa-bn-beats-adabn-α-bn-and-tent)
 5. [Results](#5-results)
-6. [Ablation, sensitivity and runtime](#6-ablation-sensitivity-and-runtime)
+6. [Ablation, sensitivity and runtime (moved from the paper)](#6-ablation-sensitivity-and-runtime)
 7. [Mathematical derivations](#7-mathematical-derivations)
 8. [Repository structure](#8-repository-structure)
 9. [Getting started](#9-getting-started)
@@ -65,6 +65,34 @@ The second change is not a domain shift, but AdaBN "corrects" it anyway. In segm
 ### 1.2 Indiscriminate replacement
 
 AdaBN overwrites every channel, and α-BN mixes every channel with the same weight, although a shift usually affects only some channels. The best global α of α-BN ranges from **0.1 to 0.9** across our 17 targets, so no single value works everywhere.
+
+### 1.3 Why batch size one, and why large batches hide the problem
+
+**Clinical setting.** Scans are acquired one examination at a time, and the contour is needed while that patient is being examined. Waiting for other patients' images to form a batch delays the result, and adapting on a batch (or on a stream, as DUA does) makes one patient's segmentation depend on other patients' images and on their order. PMSA-BN therefore adapts each image on its own ($`B=1`$) and resets afterwards (episodic adaptation).
+
+**Large batches average the confound.** Let image $`b\in\{1,\dots,B\}`$ of a test batch have class proportions $`\pi^{(b)}_k`$. BN pools over all $`B\times H\times W`$ positions, so the effective proportion of the batch is
+
+```math
+\bar\pi_k=\frac1B\sum_{b=1}^B\pi^{(b)}_k\ \to\ \mathbb E\big[\pi^{tgt}_k\big]\quad\text{as }B\to\infty
+```
+
+by the law of large numbers. Patient-to-patient differences (one image with a large lesion, $`\pi_{fg}=0.50`$, another with a tiny one, $`\pi_{fg}=0.02`$) cancel, and the pooled mean $`\sum_k\bar\pi_k\mu_k`$ becomes stable. This is why AdaBN is usually evaluated with $`B\in\{32,64\}`$ and looks reliable there. Note that the limit is the mean proportion of the **target** population, not of the source, so a residual confound $`\sum_k(\mathbb E[\pi^{tgt}_k]-\pi^{src}_k)\mu_k`$ remains whenever the two populations differ. This is consistent with the batch sweep in [Section 4](#4-why-pmsa-bn-beats-adabn-α-bn-and-tent), where AdaBN improves with $`B`$ but is still below the source model at $`B=16`$.
+
+**At $`B=1`$ nothing is averaged.** The proportions come from one patient's anatomy, $`\mu_{\mathrm{AdaBN},c}=\sum_k\pi^{(1)}_k\mu_{k,c}`$, and the statistics move by
+
+```math
+\Delta\mu_c=\sum_{k=1}^K\big(\pi^{(1)}_k-\pi^{src}_k\big)\,\mu_{k,c}
+```
+
+even if no structure changes its appearance (e.g. a lesion covering 30 % of the image when the source average is 3 %; a numerical example is in [D2](#d2-the-label-proportion-confound-of-adabn-with-numbers)). Individual anatomy is mistaken for scanner shift, and AdaBN falls below the source model on 13 of 17 transfers.
+
+**Class-conditional statistics bring a small-sample problem.** Removing the confound requires per-class statistics, and their sampling variance is
+
+```math
+\mathrm{Var}(\hat\mu_{k,c})=\frac{\sigma^2_{k,c}}{N_k}.
+```
+
+A small optic cup covers only 2–3 positions at the bottleneck. With a batch of 32 similar images it would cover about $`32\times3\approx96`$ positions, which is stable; at $`B=1`$ it is 2–3, which is not. This is what the Bayesian shrinkage of [Section 3](#3-bayesian-shrinkage-in-depth) addresses.
 
 ---
 
@@ -375,6 +403,16 @@ At the bottleneck a small cup has $`N\approx0.6`$, so the variance estimate is u
 
 Eqs. (3)–(4) mix the target estimate with the stored source class statistics. The weights have a simple meaning: $`\kappa_\mu=8`$ and $`\kappa_\sigma=16`$ are **pseudo-counts**, i.e. how many target feature positions the source estimate is worth.
 
+**Background: likelihood, prior, conjugacy.** Given observed data $`\mathcal D=\{x_i\}_{i=1}^N`$ from a distribution with parameter $`\theta`$, Bayes' rule gives the posterior
+
+```math
+p(\theta\mid\mathcal D)=\frac{p(\mathcal D\mid\theta)\,p(\theta)}{p(\mathcal D)}\ \propto\ \underbrace{p(\mathcal D\mid\theta)}_{\text{likelihood}}\times\underbrace{p(\theta)}_{\text{prior}} .
+```
+
+A prior is **conjugate** to a likelihood when the posterior lies in the same family as the prior. The posterior mean then has a closed form, so it can be computed inside every BN layer in one step, with no sampling or iterative optimization at test time.
+
+**Why "empirical" Bayes.** In subjective Bayesian analysis the prior is chosen by belief. In empirical Bayes the prior is estimated from data: here its centre is the source class statistics $`\theta_0=\{\mu^{src}_{k,c},\sigma^{2,src}_{k,c}\}`$, measured once on the labelled source training set in Phase 0. The prior is therefore anchored in real population statistics, and only its strength ($`\kappa_\mu,\kappa_\sigma`$) is a hyperparameter.
+
 **Mean (exact).** Model the class activations as $`x_i\sim\mathcal N(\mu,\sigma^2)`$ with a conjugate prior on the mean centred on the source, $`\mu\mid\sigma^2\sim\mathcal N(\mu^{src}_k,\ \sigma^2/\kappa_\mu)`$. The posterior mean is
 
 ```math
@@ -404,6 +442,31 @@ N_k\to0:\quad \gamma_k,\eta_k\to0,\quad \tilde\mu_k\to\mu^{src}_k,\ \tilde\sigma
 ```
 
 An absent class ($`N_k=0`$) gets $`\gamma_k=\eta_k=0`$, so the undefined estimates of Eq. (2) are never used. A wrong or empty pseudo-mask can only pull a class **back toward its source statistics**, never to an arbitrary value.
+
+**Why it is called shrinkage.** Subtracting the source value from Eq. (3):
+
+```math
+\tilde\mu_{k,c}-\mu^{src}_{k,c}=\frac{N_k}{N_k+\kappa_\mu}\,\big(\hat\mu_{k,c}-\mu^{src}_{k,c}\big),
+\qquad 0\le\frac{N_k}{N_k+\kappa_\mu}<1
+\ \Rightarrow\ \big|\tilde\mu_{k,c}-\mu^{src}_{k,c}\big|<\big|\hat\mu_{k,c}-\mu^{src}_{k,c}\big|
+```
+
+(for $`\hat\mu_{k,c}\neq\mu^{src}_{k,c}`$). The estimate is always pulled toward the source anchor, and the pull is strongest when $`N_k`$ is small, which is exactly when the raw estimate is least reliable. The same holds for the variance with $`\eta_k`$.
+
+**What $`\kappa_\mu`$ and $`\kappa_\sigma`$ mean.**
+
+- **Unit:** effective feature positions of the current layer, the same unit as $`N_k`$.
+- **Interpretation:** $`\kappa_\mu=8`$ says the source class mean is worth as much as 8 target positions of that class. A class with $`N_k=8`$ is weighted half target, half source; with $`N_k=80`$ it is 91 % target.
+- **Why $`\kappa_\sigma>\kappa_\mu`$:** a variance needs more samples than a mean for the same relative precision. In units of $`\sigma`$, the standard error of the mean is $`1/\sqrt N`$, while the relative standard error of the sample variance is $`\sqrt{2/(N-1)}`$. Equal precision requires $`N-1\approx2N`$, i.e. about twice as many samples, so $`\kappa_\sigma=2\kappa_\mu=16`$.
+- **How they were set:** fixed once for all 17 transfers, with no target tuning. Over the 27 combinations $`\kappa_\mu\in\{4,8,16\}`$, $`\kappa_\sigma\in\{8,16,32\}`$, $`\tau_{hi}\in\{0.8,0.9,0.95\}`$, Dice changes by at most 0.008 ([Section 6](#6-ablation-sensitivity-and-runtime)), and [D9](#d9-biasvariance-trade-off-and-the-meaning-of-κ) shows why the optimum is flat.
+
+**Three regimes.** "Large" and "small" describe a class's footprint $`N_k`$ **in the current layer**, not the class itself. The same optic cup can be large in a shallow layer and small at the bottleneck.
+
+| Regime | When it happens | Weights | Result |
+| :-- | :-- | :-- | :-- |
+| Large footprint, $`N_k\gg\kappa`$ | background in every layer; large lesions or lungs in shallow and middle layers | e.g. $`N_k=200`$: $`\gamma_k=200/208=0.96`$ | the image's own statistics are used |
+| Small footprint, $`0<N_k\ll\kappa`$ | small optic cup or polyp at the 12×12 bottleneck | e.g. $`N_k=2`$: $`\gamma_k=0.2`$, $`\eta_k=1/17`$ | mostly the source class statistics |
+| Empty, $`N_k=0`$ | no pixel passes $`\theta_{hi}`$, or the class is absent | $`\gamma_k=\eta_k=0`$ | exactly the source class statistics, no division by zero |
 
 ### 3.4 Bias–variance trade-off in numbers
 
@@ -467,6 +530,24 @@ PH² → ISIC 2018, $`n=600`$, Dice (single seed):
 PMSA-BN is the best adaptation method at every batch size and peaks at $`B=1`$; for $`B\ge4`$ it stays within 0.001 of the source model.
 
 ![Batch-size sweep across three modalities](figures/fig1_batch_size_3panel.png)
+
+The figure below was Fig. 2 of the paper draft; it is kept here to save space in the 4-page paper.
+
+![Batch-size sensitivity across three modalities](figures/fig1_batch_size_all_in_one.png)
+
+*Batch-size sensitivity across three modalities (ΔDice relative to the source model). AdaBN fails at $`B=1`$ and recovers only partly with larger batches, whereas PMSA-BN stays stable at every batch size.*
+
+**Summary: AdaBN versus PMSA-BN.**
+
+| Property | AdaBN | PMSA-BN |
+| :-- | :-- | :-- |
+| Batch size | degrades at small $`B`$; still below the source model at $`B=16`$ in our sweep | designed for $`B=1`$; stable at every $`B`$ |
+| Class treatment | pooled over all pixels (class-blind) | class-conditional $`\hat\mu_{k,c},\hat\sigma^2_{k,c}`$ |
+| Label-proportion shift | confounded by structure size | invariant (prior matching, Proposition 1) |
+| Small structures | not separated, so not an issue, but the confound remains | empirical-Bayes shrinkage toward source class statistics |
+| Adaptation scope | every channel fully replaced ($`\alpha=1`$) | per channel, $`\alpha_c`$ from the normalized $`W_2`$ shift |
+| Target labels | none | none |
+| Backpropagation | none, one forward pass | none, two forward passes (≈25 ms) |
 
 ---
 
@@ -559,6 +640,30 @@ Against the best of *all* baselines (including TENT and α-BN\*), PMSA-BN is aga
 
 With four classes and tumour sub-regions below 1 % of the image, AdaBN and TENT lose about 40 Dice points. PMSA-BN has the highest mean Dice with both backbones and the best enhancing-tumour Dice with ResNet-34; with ResNet-34, Source Only remains higher on WT and TC. Note that BraTS 2020 shares many cases with BraTS 2019, so this benchmark measures robustness to the multi-class setting more than to a strong domain shift.
 
+### 5.4 Datasets and their references
+
+The paper cites only part of these datasets for space; please cite the original sources when you use them.
+
+| Modality | Dataset | Reference |
+| :-- | :-- | :-- |
+| Fundus | REFUGE | J. I. Orlando et al., "REFUGE challenge: A unified framework for evaluating automated methods for glaucoma assessment from fundus photographs," *Med. Image Anal.*, vol. 59, 101570, 2020. |
+| Fundus | Drishti-GS | J. Sivaswamy et al., "Drishti-GS: Retinal image dataset for optic nerve head (ONH) segmentation," *Proc. ISBI*, pp. 53–56, 2014. |
+| Fundus | ORIGA | Z. Zhang et al., "ORIGA-light: An online retinal fundus image database for glaucoma analysis and research," *Proc. EMBC*, pp. 3065–3068, 2010. |
+| Fundus | RIM-ONE r3 | F. Fumero et al., "RIM-ONE: An open retinal image database for optic nerve evaluation," *Proc. IEEE CBMS*, pp. 1–6, 2011. |
+| Fundus | PAPILA | O. Kovalyk et al., "PAPILA: Dataset with fundus images and clinical data of both eyes of the same patient for glaucoma assessment," *Sci. Data*, vol. 9, 291, 2022. |
+| Colonoscopy | Kvasir-SEG | D. Jha et al., "Kvasir-SEG: A segmented polyp dataset," *Proc. MMM*, pp. 451–462, 2020. |
+| Colonoscopy | CVC-ClinicDB | J. Bernal et al., "WM-DOVA maps for accurate polyp highlighting in colonoscopy: Validation vs. saliency maps from physicians," *Comput. Med. Imaging Graph.*, vol. 43, pp. 99–111, 2015. |
+| Colonoscopy | ETIS-Larib | J. Silva et al., "Toward embedded detection of polyps in WCE images for early diagnosis of colorectal cancer," *Int. J. Comput. Assist. Radiol. Surg.*, vol. 9, no. 2, pp. 283–293, 2014. |
+| Chest X-ray | Montgomery, Shenzhen | S. Jaeger et al., "Two public chest X-ray datasets for computer-aided screening of pulmonary diseases," *Quant. Imaging Med. Surg.*, vol. 4, no. 6, pp. 475–477, 2014. |
+| Chest X-ray | JSRT | J. Shiraishi et al., "Development of a digital image database for chest radiographs with and without a lung nodule," *Am. J. Roentgenol.*, vol. 174, no. 1, pp. 71–74, 2000. |
+| Chest X-ray | COVID-QU-Ex | A. M. Tahir et al., "COVID-19 infection localization and severity grading from chest X-ray images," *Comput. Biol. Med.*, vol. 139, 105002, 2021. |
+| Dermoscopy | ISIC 2018 | N. Codella et al., "Skin lesion analysis toward melanoma detection 2018: A challenge hosted by the ISIC," arXiv:1902.03368, 2019. |
+| Dermoscopy | PH² | T. Mendonça et al., "PH² – A dermoscopic image database for research and benchmarking," *Proc. EMBC*, pp. 5437–5440, 2013. |
+| Dermoscopy | HAM10000 | P. Tschandl et al., "The HAM10000 dataset, a large collection of multi-source dermatoscopic images of common pigmented skin lesions," *Sci. Data*, vol. 5, 180161, 2018. |
+| Dermoscopy | Derm7pt | J. Kawahara et al., "Seven-point checklist and skin lesion classification using multitask multimodal neural nets," *IEEE J. Biomed. Health Inform.*, vol. 23, no. 2, pp. 538–546, 2019. |
+
+Related methods not in the paper's reference list for space: channel-selective normalization (P. Vianna et al., arXiv:2402.04958, 2024), which adapts only some channels for label shift in classification, and VPTTA (Z. Chen et al., *Proc. CVPR*, 2024), which adapts prompts with backpropagation.
+
 ---
 
 ## 6. Ablation, sensitivity and runtime
@@ -574,7 +679,12 @@ With four classes and tumour sub-regions below 1 % of the image, AdaBN and TENT 
 | + shrinkage (Eqs. 3–4) | .765 | .818 | .619 |
 | + per-channel α (full PMSA-BN, Eqs. 6–8) | **.864** | **.841** | **.627** |
 
-Class-conditional statistics with **target** proportions are worse than AdaBN on all three transfers (the cup collapses to .094), which confirms the label-proportion confound; prior matching recovers it. Shrinkage matters for tiny structures, and per-channel mixing gives the final gain. Using ground-truth masks instead of pseudo-masks improves Dice by only 0.006, and running pass 1 with AdaBN statistics lowers it by 0.007.
+This table and the discussion below were moved here from the paper to save space.
+
+- **Class-conditional statistics with target proportions** are worse than AdaBN on all three transfers (the Drishti-GS cup collapses to .094). Splitting the statistics by class is not enough on its own: recombining them with the image's own proportions brings the label-proportion confound back.
+- **Prior matching** (recombining with the source proportions) recovers this loss on every transfer.
+- **Shrinkage** adds +.058 on the tiny optic cup and +.041 on Kvasir → ETIS-Larib (MobileNetV2, diminutive polyps), but at most +.006 on large skin lesions, where $`N_k\gg\kappa`$ and $`\gamma_k,\eta_k`$ are already close to 1. This matches the regimes in [Section 3.3](#33-the-shrinkage-estimator-and-its-bayesian-derivation).
+- **Per-channel mixing** gives the final gain and is what lifts the large-lesion transfers (PH² → ISIC, CVC-ClinicDB → Kvasir) above Source Only: channels that did not shift keep their source statistics. Using ground-truth masks instead of pseudo-masks improves Dice by only 0.006, and running pass 1 with AdaBN statistics lowers it by 0.007.
 
 **Hyperparameter sensitivity** (all 27 combinations of $`\kappa_\mu\in\{4,8,16\}`$, $`\kappa_\sigma\in\{8,16,32\}`$, $`\tau_{hi}\in\{0.8,0.9,0.95\}`$; MobileNetV2):
 
@@ -700,6 +810,53 @@ So the posterior is Gaussian with mean
 
 and variance $`\sigma^2/(N+\kappa_\mu)`$: the source prior acts exactly like $`\kappa_\mu`$ extra observations. With $`\bar x=\hat\mu_k`$ and $`N=N_k`$ this is Eq. (3).
 
+**The same result from the densities, step by step.** Work with the sufficient statistic $`\hat\mu_{k,c}`$ directly. Since it is a weighted average of $`N_k`$ Gaussian activations, its sampling distribution is
+
+```math
+\hat\mu_{k,c}\mid\mu_{k,c}\sim\mathcal N\!\Big(\mu_{k,c},\ \frac{\sigma^2_{k,c}}{N_k}\Big),
+\qquad
+\mu_{k,c}\sim\mathcal N\!\Big(\mu^{src}_{k,c},\ \frac{\sigma^2_{k,c}}{\kappa_\mu}\Big)\ \ (\text{prior}).
+```
+
+*Step A, densities.* A Gaussian $`\mathcal N(m,s^2)`$ has $`p(z)\propto\exp\!\big(-(z-m)^2/2s^2\big)`$, so
+
+```math
+p(\hat\mu_{k,c}\mid\mu_{k,c})\propto\exp\!\Big(-\frac{N_k}{2\sigma^2_{k,c}}(\mu_{k,c}-\hat\mu_{k,c})^2\Big),
+\qquad
+p(\mu_{k,c})\propto\exp\!\Big(-\frac{\kappa_\mu}{2\sigma^2_{k,c}}(\mu_{k,c}-\mu^{src}_{k,c})^2\Big).
+```
+
+*Step B, multiply.* Multiplying the two adds the exponents:
+
+```math
+p(\mu_{k,c}\mid\hat\mu_{k,c})\propto\exp\!\Big(-\frac{1}{2\sigma^2_{k,c}}\,J(\mu_{k,c})\Big),\qquad
+J(\mu)=N_k(\mu-\hat\mu_{k,c})^2+\kappa_\mu(\mu-\mu^{src}_{k,c})^2 .
+```
+
+*Step C, expand.*
+
+```math
+J(\mu)=(N_k+\kappa_\mu)\,\mu^2-2\mu\,\big(N_k\hat\mu_{k,c}+\kappa_\mu\mu^{src}_{k,c}\big)+\big[N_k\hat\mu_{k,c}^2+\kappa_\mu(\mu^{src}_{k,c})^2\big].
+```
+
+The bracket does not contain $`\mu`$ and is absorbed into the proportionality constant.
+
+*Step D, complete the square.* With $`A\mu^2-2B\mu=A(\mu-B/A)^2-B^2/A`$, $`A=N_k+\kappa_\mu`$, $`B=N_k\hat\mu_{k,c}+\kappa_\mu\mu^{src}_{k,c}`$:
+
+```math
+J(\mu)=(N_k+\kappa_\mu)\Big(\mu-\frac{N_k\hat\mu_{k,c}+\kappa_\mu\mu^{src}_{k,c}}{N_k+\kappa_\mu}\Big)^2+\text{const}.
+```
+
+*Step E, read off the posterior.* The posterior is Gaussian with variance $`\sigma^2_{k,c}/(N_k+\kappa_\mu)`$ and mean
+
+```math
+\tilde\mu_{k,c}=\mathbb E[\mu_{k,c}\mid\hat\mu_{k,c}]
+=\frac{N_k\hat\mu_{k,c}+\kappa_\mu\mu^{src}_{k,c}}{N_k+\kappa_\mu}
+=\frac{N_k}{N_k+\kappa_\mu}\,\hat\mu_{k,c}+\frac{\kappa_\mu}{N_k+\kappa_\mu}\,\mu^{src}_{k,c},
+```
+
+which is Eq. (3).
+
 ### D8. The class variance (Eq. 4) and its relation to the exact posterior
 
 **Pooled-variance view (Eq. 4).** The source class variance is treated as an estimate carrying $`\kappa_\sigma`$ degrees of freedom; the target estimate carries $`N-1`$. The classical pooled variance weights each estimate by its degrees of freedom:
@@ -723,6 +880,14 @@ b_N=b_0+\tfrac12(N-1)s^2+\frac{\kappa_\mu N}{2(\kappa_\mu+N)}(\bar x-\mu^{src}_k
 ```
 
 Eq. (4) keeps the two main terms of this expression with the pooled degrees of freedom $`\kappa_\sigma+N-1`$ in the denominator, and drops the mean-difference term. The dropped term only matters when the class mean itself has shifted, and that shift is already handled by Eq. (3). Eq. (4) is therefore the pooled-variance form of the conjugate update: exact as a degrees-of-freedom-weighted average, and approximate as a posterior mean.
+
+**Scaled-inverse-χ² view.** The same update is often written with the scaled-inverse-χ² prior, the conjugate prior for a Gaussian variance: $`\sigma^2_{k,c}\sim\text{Scale-Inv-}\chi^2(\kappa_\sigma,\ \sigma^{2,src}_{k,c})`$, i.e. $`\kappa_\sigma`$ prior degrees of freedom with scale $`\sigma^{2,src}_{k,c}`$. The sample variance contributes $`\nu=(N_k-1)_+`$ degrees of freedom (Bessel's correction). For a known mean, the posterior is
+
+```math
+\sigma^2_{k,c}\mid\mathcal D\sim\text{Scale-Inv-}\chi^2\!\Big(\nu+\kappa_\sigma,\ \frac{\nu\,\hat\sigma^2_{k,c}+\kappa_\sigma\,\sigma^{2,src}_{k,c}}{\nu+\kappa_\sigma}\Big).
+```
+
+Its **scale parameter** is exactly Eq. (4), $`\eta_k\hat\sigma^2_{k,c}+(1-\eta_k)\sigma^{2,src}_{k,c}`$ with $`\eta_k=\nu/(\nu+\kappa_\sigma)`$. The posterior mean is this scale times $`(\nu+\kappa_\sigma)/(\nu+\kappa_\sigma-2)`$, a factor of at most $`16/14\approx1.14`$ for $`\kappa_\sigma=16`$ (when $`\nu=0`$) that approaches 1 in large classes. Eq. (4) uses the scale without this factor, which is the same simplification as in the pooled-variance view above.
 
 ### D9. Bias–variance trade-off and the meaning of κ
 
