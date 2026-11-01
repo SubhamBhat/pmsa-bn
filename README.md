@@ -17,6 +17,8 @@ PMSA-BN adapts the batch-normalization (BN) statistics of a trained segmentation
 
 ![PMSA-BN architecture](figures/fig_pmsa_bn_architecture.png)
 
+*Equation numbers in the figure refer to the paper. Notation: hat = raw target statistics, tilde = shrunk, bar = mixed; superscript run = BN running statistics, src = source class statistics.*
+
 ---
 
 ## Contents
