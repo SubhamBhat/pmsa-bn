@@ -102,14 +102,19 @@ A small optic cup covers only 2–3 positions at the bottleneck. With a batch of
 
 PMSA-BN changes only the normalization statistics. The network weights and the BN affine parameters $`(\gamma^{BN},\beta^{BN})`$ are never updated.
 
+![PMSA-BN overview (paper Fig. 1)](figures/fig_pmsa_bn_overview_paper.png)
+
+*Compact overview, as in Fig. 1 of the paper; the detailed version is at the top of this page.*
+
 ### 2.1 Notation
 
 | Symbol | Meaning |
 | :-- | :-- |
 | $`K`$ | number of classes; they must partition the image (fundus: background, rim = disc − cup, cup) |
-| $`\mu^{src}_c,\ \sigma^{2,src}_c`$ | stored BN running statistics of channel $`c`$ |
+| $`\mu^{run}_c,\ \sigma^{2,run}_c`$ | stored BN running statistics of channel $`c`$ |
+| $`\hat\mu,\ \tilde\mu,\ \bar\mu`$ | raw target estimate, shrunk estimate, mixed statistic used for normalization |
 | $`\mu^{src}_k,\ \sigma^{2,src}_k,\ \pi^{src}_k`$ | source class statistics and class proportions (Phase 0) |
-| $`P^{(0)}`$ | class probabilities from pass 1 (source statistics) |
+| $`P^{(0)}`$ | class probabilities from pass 1 (running statistics) |
 | $`M_k`$ | confident pseudo-mask of class $`k`$ |
 | $`w_k(i,j)\in[0,1]`$ | fraction of feature position $`(i,j)`$ covered by class $`k`$ at the current layer |
 | $`N_k=\sum_{i,j}w_k(i,j)`$ | effective number of class-$`k`$ positions at the current layer |
@@ -157,22 +162,22 @@ with $`\tau_{hi}=0.9`$ and $`\tau_{lo}=0.1`$. All other pixels are uncertain and
 \qquad\qquad(5)
 ```
 
-**Shift-adaptive mixing.** Each channel's shift is measured by the squared 2-Wasserstein distance between $`\mathcal N(\mu_{PM,c},\sigma^2_{PM,c})`$ and $`\mathcal N(\mu^{src}_c,\sigma^{2,src}_c)`$, normalized by the source variance, and mapped to a mixing weight:
+**Shift-adaptive mixing.** Each channel's shift is measured by the squared 2-Wasserstein distance between $`\mathcal N(\mu_{PM,c},\sigma^2_{PM,c})`$ and $`\mathcal N(\mu^{run}_c,\sigma^{2,run}_c)`$, normalized by the source variance, and mapped to a mixing weight:
 
 ```math
-D_c=\frac{(\mu_{PM,c}-\mu^{src}_c)^2+(\sigma_{PM,c}-\sigma^{src}_c)^2}{\sigma^{2,src}_c+\epsilon},\qquad
+D_c=\frac{(\mu_{PM,c}-\mu^{run}_c)^2+(\sigma_{PM,c}-\sigma^{run}_c)^2}{\sigma^{2,run}_c+\epsilon},\qquad
 \alpha_c=1-e^{-D_c/\tau}
 \qquad\qquad(6)
 ```
 
 ```math
-\hat\mu_c=\alpha_c\,\mu_{PM,c}+(1-\alpha_c)\,\mu^{src}_c,\qquad
-\hat\sigma^2_c=\alpha_c\,\sigma^2_{PM,c}+(1-\alpha_c)\,\sigma^{2,src}_c
+\bar\mu_c=\alpha_c\,\mu_{PM,c}+(1-\alpha_c)\,\mu^{run}_c,\qquad
+\bar\sigma^2_c=\alpha_c\,\sigma^2_{PM,c}+(1-\alpha_c)\,\sigma^{2,run}_c
 \qquad\qquad(7)
 ```
 
 ```math
-y_c=\gamma^{BN}_c\,\frac{x_c-\hat\mu_c}{\sqrt{\hat\sigma^2_c+\epsilon_{BN}}}+\beta^{BN}_c
+y_c=\gamma^{BN}_c\,\frac{x_c-\bar\mu_c}{\sqrt{\bar\sigma^2_c+\epsilon_{BN}}}+\beta^{BN}_c
 \qquad\qquad(8)
 ```
 
@@ -186,7 +191,7 @@ An unshifted channel keeps its source statistics ($`\alpha_c\approx 0`$); a stro
 
 ```math
 \mu_{AdaBN}=\sum_k\pi^{tgt}_k\,\mu_k,\qquad
-\mu_{AdaBN}-\mu^{src}=\sum_k\big(\pi^{tgt}_k-\pi^{src}_k\big)\,\mu_k\neq 0
+\mu_{AdaBN}-\mu^{run}=\sum_k\big(\pi^{tgt}_k-\pi^{src}_k\big)\,\mu_k\neq 0
 ```
 
 whenever the proportions change and the class means differ, even though no class changed its appearance. $`\blacksquare`$
@@ -307,7 +312,7 @@ The effective sample size is the **total** count over images, $`\sum_n N^{(l)}_{
 \big|\mu^{src}_{k,\text{nearest}}-\mu^{src}_{k,\text{pure}}\big|\ \le\ \rho_k\,\max_{j\neq k}\big|\mu_j-\mu_k\big| ,
 ```
 
-and $`\rho_k`$ is small at shallow layers, where most statistics are collected. Because the BN running statistics stored in the network were themselves computed from all pixels, the check $`\sum_k\pi^{src}_k\mu^{src}_k\approx\mu^{src}`$ still holds.
+and $`\rho_k`$ is small at shallow layers, where most statistics are collected. Because the BN running statistics stored in the network were themselves computed from all pixels, the check $`\sum_k\pi^{src}_k\mu^{src}_k\approx\mu^{run}`$ still holds.
 
 **Why nearest-neighbour is acceptable in Phase 0 but not at test time.** Phase 0 estimates *population* statistics from hundreds of labelled images: hard weights are unbiased (Justification 1), and their noise averages out (Justifications 2–3). At test time there is **one** image and, at deep layers, often less than one feature position per small structure. A single sampled pixel can then decide whether the class is seen at all (the 0, 1 or 2 counts above), so test time uses the exact fractional weights of Part B, and shrinkage handles the remaining uncertainty.
 
@@ -752,8 +757,8 @@ Example: $`\mu_0=0,\ \mu_1=3,\ \sigma_0=\sigma_1=1`$. A source image with $`\pi=
 Eq. (5) uses only $`\pi^{src}`$, so $`\partial\mu_{PM}/\partial\pi^{tgt}_k=0`$ and $`\partial\sigma^2_{PM}/\partial\pi^{tgt}_k=0`$: the target proportions do not enter at all. If the class statistics are unchanged, $`\tilde\mu_k=\mu^{src}_k`$ and $`\tilde\sigma_k^2=\sigma^{2,src}_k`$, and by D1
 
 ```math
-\mu_{PM}=\sum_k\pi^{src}_k\mu^{src}_k=\mu^{src},\qquad
-\sigma^2_{PM}=\sum_k\pi^{src}_k\sigma^{2,src}_k+\sum_k\pi^{src}_k(\mu^{src}_k-\mu^{src})^2=\sigma^{2,src},
+\mu_{PM}=\sum_k\pi^{src}_k\mu^{src}_k=\mu^{run},\qquad
+\sigma^2_{PM}=\sum_k\pi^{src}_k\sigma^{2,src}_k+\sum_k\pi^{src}_k(\mu^{src}_k-\mu^{run})^2=\sigma^{2,run},
 ```
 
 up to the Phase-0 estimation error. Then $`D_c=0`$, $`\alpha_c=0`$ and Eq. (8) reduces to the source BN layer exactly.
@@ -920,7 +925,7 @@ W_2^2&=\int_0^1\big[(m_1-m_2)+(s_1-s_2)\Phi^{-1}(u)\big]^2du\\
 \end{aligned}
 ```
 
-Dividing by $`\sigma^{2,src}_c`$ gives $`D_c`$. **Scale invariance:** for $`x\to a x`$ all means and standard deviations scale by $`|a|`$, so the numerator and the denominator both scale by $`a^2`$ and $`D_c`$ is unchanged (up to $`\epsilon`$). **Comparison with KL:**
+Dividing by $`\sigma^{2,run}_c`$ gives $`D_c`$. **Scale invariance:** for $`x\to a x`$ all means and standard deviations scale by $`|a|`$, so the numerator and the denominator both scale by $`a^2`$ and $`D_c`$ is unchanged (up to $`\epsilon`$). **Comparison with KL:**
 
 ```math
 \mathrm{KL}\big(\mathcal N_{PM}\,\|\,\mathcal N_{src}\big)=\log\frac{\sigma_{src}}{\sigma_{PM}}+\frac{\sigma_{PM}^2+(\mu_{PM}-\mu_{src})^2}{2\sigma_{src}^2}-\frac12
@@ -937,7 +942,7 @@ and the reverse direction divides by $`\sigma_{PM}^2`$. $`D_c`$ never divides by
 \alpha_c\approx\frac{D_c}{\tau}\ \text{for}\ D_c\ll\tau .
 ```
 
-So $`\alpha_c\in[0,1)`$ grows monotonically with the shift and is linear for small shifts. With $`\alpha_c=0`$, Eqs. (7)–(8) give $`\hat\mu_c=\mu^{src}_c`$ and $`\hat\sigma^2_c=\sigma^{2,src}_c`$, i.e. the original BN layer; with $`\alpha_c\to1`$ the layer uses the prior-matched target statistics. Means and variances are interpolated linearly, as in α-BN; interpolating variances (rather than standard deviations) keeps Eq. (7) in the same units as Eq. (5).
+So $`\alpha_c\in[0,1)`$ grows monotonically with the shift and is linear for small shifts. With $`\alpha_c=0`$, Eqs. (7)–(8) give $`\bar\mu_c=\mu^{run}_c`$ and $`\bar\sigma^2_c=\sigma^{2,run}_c`$, i.e. the original BN layer; with $`\alpha_c\to1`$ the layer uses the prior-matched target statistics. Means and variances are interpolated linearly, as in α-BN; interpolating variances (rather than standard deviations) keeps Eq. (7) in the same units as Eq. (5).
 
 ---
 
