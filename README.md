@@ -128,11 +128,11 @@ After training, the labelled source training images are passed through the netwo
 **Pass 1 and confident pseudo-masks.** A forward pass with the source statistics gives $`P^{(0)}`$. Only confident pixels are kept:
 
 ```math
-M_k=\{(i,j):\ \arg\max_{k'}P^{(0)}_{k'}=k,\ P^{(0)}_k>\tau_{hi}\},\qquad
-M_{bg}=\{(i,j):\ P^{(0)}_k<\tau_{lo}\ \ \forall k\neq bg\}
+M_k=\{(i,j):\ \arg\max_{k'}P^{(0)}_{k'}=k,\ P^{(0)}_k>\theta_{hi}\},\qquad
+M_{bg}=\{(i,j):\ P^{(0)}_k<\theta_{lo}\ \ \forall k\neq bg\}
 ```
 
-with $`\tau_{hi}=0.9`$ and $`\tau_{lo}=0.1`$. All other pixels are uncertain and excluded. For nested structures the disc mask is $`\{P_{rim}+P_{cup}>\tau_{hi}\}`$, the cup mask is restricted to the disc, and the rim is their difference.
+with $`\theta_{hi}=0.9`$ and $`\theta_{lo}=0.1`$. All other pixels are uncertain and excluded. For nested structures the disc mask is $`\{P_{rim}+P_{cup}>\theta_{hi}\}`$, the cup mask is restricted to the disc, and the rim is their difference.
 
 **Pass 2: class-conditional statistics.** In the second pass every BN layer, in forward order, average-pools $`M_k`$ to its resolution and computes
 
@@ -465,7 +465,7 @@ An absent class ($`N_k=0`$) gets $`\gamma_k=\eta_k=0`$, so the undefined estimat
 - **Unit:** effective feature positions of the current layer, the same unit as $`N_k`$.
 - **Interpretation:** $`\kappa_\mu=8`$ says the source class mean is worth as much as 8 target positions of that class. A class with $`N_k=8`$ is weighted half target, half source; with $`N_k=80`$ it is 91 % target.
 - **Why $`\kappa_\sigma>\kappa_\mu`$:** a variance needs more samples than a mean for the same relative precision. In units of $`\sigma`$, the standard error of the mean is $`1/\sqrt N`$, while the relative standard error of the sample variance is $`\sqrt{2/(N-1)}`$. Equal precision requires $`N-1\approx2N`$, i.e. about twice as many samples, so $`\kappa_\sigma=2\kappa_\mu=16`$.
-- **How they were set:** fixed once for all 17 transfers, with no target tuning. Over the 27 combinations $`\kappa_\mu\in\{4,8,16\}`$, $`\kappa_\sigma\in\{8,16,32\}`$, $`\tau_{hi}\in\{0.8,0.9,0.95\}`$, Dice changes by at most 0.008 ([Section 6](#6-ablation-sensitivity-and-runtime)), and [D9](#d9-biasvariance-trade-off-and-the-meaning-of-κ) shows why the optimum is flat.
+- **How they were set:** fixed once for all 17 transfers, with no target tuning; the full justification is [below](#why-kappa_mu8-and-kappa_sigma16). Over the 27 combinations $`\kappa_\mu\in\{4,8,16\}`$, $`\kappa_\sigma\in\{8,16,32\}`$, $`\theta_{hi}\in\{0.8,0.9,0.95\}`$, Dice changes by at most 0.008 ([Section 6](#6-ablation-sensitivity-and-runtime)), and [D9](#d9-biasvariance-trade-off-and-the-meaning-of-κ) shows why the optimum is flat.
 
 **Three regimes.** "Large" and "small" describe a class's footprint $`N_k`$ **in the current layer**, not the class itself. The same optic cup can be large in a shallow layer and small at the bottleneck.
 
@@ -474,6 +474,49 @@ An absent class ($`N_k=0`$) gets $`\gamma_k=\eta_k=0`$, so the undefined estimat
 | Large footprint, $`N_k\gg\kappa`$ | background in every layer; large lesions or lungs in shallow and middle layers | e.g. $`N_k=200`$: $`\gamma_k=200/208=0.96`$ | the image's own statistics are used |
 | Small footprint, $`0<N_k\ll\kappa`$ | small optic cup or polyp at the 12×12 bottleneck | e.g. $`N_k=2`$: $`\gamma_k=0.2`$, $`\eta_k=1/17`$ | mostly the source class statistics |
 | Empty, $`N_k=0`$ | no pixel passes $`\theta_{hi}`$, or the class is absent | $`\gamma_k=\eta_k=0`$ | exactly the source class statistics, no division by zero |
+
+#### Why $`\kappa_\mu=8`$ and $`\kappa_\sigma=16`$
+
+The two pseudo-counts were fixed once, before any target data was used, and are the same for all 17 transfers. Four arguments support the values.
+
+**1. κ is the noise-to-gap ratio at which shrinkage is optimal.** From [D9](#d9-biasvariance-trade-off-and-the-meaning-of-κ), the error of the shrunk mean is
+
+```math
+\mathrm{MSE}(\gamma)=\gamma^2\frac{\sigma^2}{N}+(1-\gamma)^2\delta^2,
+\qquad
+\gamma^\star=\frac{N}{N+\sigma^2/\delta^2}
+\quad\Rightarrow\quad
+\kappa^\star_\mu=\frac{\sigma^2}{\delta^2},
+```
+
+where $`\sigma^2`$ is the within-class variance of a channel and $`\delta`$ the source–target gap of the class mean. So $`\kappa_\mu=8`$ is optimal when $`\delta=\sigma/\sqrt8\approx0.35\,\sigma`$: the class mean moves by about a third of its own spread between domains. This is a moderate shift, large enough to disturb the stored BN statistics but small compared with the variation inside one structure. It is an assumption about the typical shift, not a measured quantity. Larger shifts are not lost: they produce a large $`D_c`$, and the per-channel mixing (Eq. 6) then adapts that channel strongly.
+
+**2. It switches shrinkage on exactly where raw estimates fail.** For the real Drishti-GS cup (3.1 % of the 384×384 image), the effective count and the two weights at each resolution are:
+
+| Layer grid | $`N_k`$ | $`\gamma_k`$ ($`\kappa_\mu=8`$) | $`\eta_k`$ ($`\kappa_\sigma=16`$) | Effect |
+| :-: | --: | :-: | :-: | :-- |
+| 192 × 192 | 1143 | 0.99 | 0.99 | target statistics |
+| 96 × 96 | 286 | 0.97 | 0.95 | target statistics |
+| 48 × 48 | 71.4 | 0.90 | 0.81 | mostly target |
+| 24 × 24 | 17.9 | 0.69 | 0.51 | mixed |
+| 12 × 12 (bottleneck) | 4.5 | 0.36 | 0.18 | mostly source |
+
+The same table holds for decoder layers at the same resolution. A smaller cup (0.4 % of the image) has $`N_k\approx0.6`$ at the bottleneck, giving $`\gamma_k=0.07`$ and $`\eta_k=0`$; the background always has $`N_k\gg\kappa`$. With $`\kappa_\mu=8`$, shrinkage is effectively off in the shallow layers and strong only at the two deepest resolutions, which is where [Section 3.2](#32-why-raw-class-statistics-fail-at-small-n_k) shows that raw estimates break down. Much smaller or larger values move this switch to the wrong place: with $`\kappa_\mu=1`$ the 4.5-position bottleneck cup would still be 82 % raw ($`\gamma_k=0.82`$), and with $`\kappa_\mu=64`$ even the 48 × 48 layer would be shrunk halfway ($`\gamma_k=0.53`$).
+
+**3. $`\kappa_\sigma=2\kappa_\mu`$ gives the mean and the variance the same reliability.** In units of $`\sigma`$, the standard error of a mean from $`N`$ positions is $`1/\sqrt N`$, while the relative standard error of a sample variance is $`\sqrt{2/(N-1)}`$. They are equal when $`N-1\approx2N`$, i.e. a variance needs about twice as many positions as a mean to be equally trustworthy. Doubling the pseudo-count for the variance accounts for this. Leaning toward the source for the variance is also the safer error: a variance estimated too small inflates the normalized activations (the +283 activation in [Section 3.5](#35-worked-example-on-the-real-patient)), while one pulled toward the source only slightly under-adapts.
+
+**4. The exact value matters little.** Assuming the gap of argument 1 ($`\delta^2=\sigma^2/8`$, $`\sigma^2=1`$), the mean-squared error of the class mean is:
+
+| $`N_k`$ | raw, $`\kappa_\mu=0`$ | $`\kappa_\mu=4`$ | $`\kappa_\mu=8`$ | $`\kappa_\mu=16`$ |
+| --: | :-: | :-: | :-: | :-: |
+| 0.6 | 1.667 | 0.123 | **0.116** | 0.118 |
+| 4.5 | 0.222 | 0.090 | **0.080** | 0.087 |
+| 17.9 | 0.056 | 0.042 | **0.039** | 0.043 |
+| 71.4 | 0.014 | 0.013 | **0.013** | 0.014 |
+
+Halving or doubling $`\kappa_\mu`$ raises the error by at most 12.5 %, whereas using no shrinkage is up to 14 times worse. The experiments agree: over all 27 combinations of $`\kappa_\mu\in\{4,8,16\}`$, $`\kappa_\sigma\in\{8,16,32\}`$ and $`\theta_{hi}\in\{0.8,0.9,0.95\}`$, Dice changes by at most 0.008 ([Section 6](#6-ablation-sensitivity-and-runtime)).
+
+**What was not done.** κ was not tuned on target labels. The sensitivity grid in Section 6 was run afterwards on three targets to check robustness, not to choose the values.
 
 ### 3.4 Bias–variance trade-off in numbers
 
@@ -560,7 +603,7 @@ The figure below was Fig. 2 of the paper draft; it is kept here to save space in
 
 ## 5. Results
 
-All results: single-image adaptation ($`B=1`$), mean of three seeds, hyperparameters chosen **without target data** ($`\tau_{hi}/\tau_{lo}=0.9/0.1`$, $`\kappa_\mu/\kappa_\sigma=8/16`$, $`\tau`$ per source domain). PMSA-BN's gain over the best baseline is positive in every seed (mean seed standard deviation 0.04 points).
+All results: single-image adaptation ($`B=1`$), mean of three seeds, hyperparameters chosen **without target data** ($`\theta_{hi}/\theta_{lo}=0.9/0.1`$, $`\kappa_\mu/\kappa_\sigma=8/16`$, $`\tau`$ per source domain). PMSA-BN's gain over the best baseline is positive in every seed (mean seed standard deviation 0.04 points).
 
 ### 5.1 Main results (ResNet-34 U-Net)
 
@@ -693,7 +736,7 @@ This table and the discussion below were moved here from the paper to save space
 - **Shrinkage** adds +.058 on the tiny optic cup and +.041 on Kvasir → ETIS-Larib (MobileNetV2, diminutive polyps), but at most +.006 on large skin lesions, where $`N_k\gg\kappa`$ and $`\gamma_k,\eta_k`$ are already close to 1. This matches the regimes in [Section 3.3](#33-the-shrinkage-estimator-and-its-bayesian-derivation).
 - **Per-channel mixing** gives the final gain and is what lifts the large-lesion transfers (PH² → ISIC, CVC-ClinicDB → Kvasir) above Source Only: channels that did not shift keep their source statistics. Using ground-truth masks instead of pseudo-masks improves Dice by only 0.006, and running pass 1 with AdaBN statistics lowers it by 0.007.
 
-**Hyperparameter sensitivity** (all 27 combinations of $`\kappa_\mu\in\{4,8,16\}`$, $`\kappa_\sigma\in\{8,16,32\}`$, $`\tau_{hi}\in\{0.8,0.9,0.95\}`$; MobileNetV2):
+**Hyperparameter sensitivity** (all 27 combinations of $`\kappa_\mu\in\{4,8,16\}`$, $`\kappa_\sigma\in\{8,16,32\}`$, $`\theta_{hi}\in\{0.8,0.9,0.95\}`$; MobileNetV2):
 
 | Target | Default setting | Grid minimum | Grid maximum | Range |
 | :-- | :-: | :-: | :-: | :-: |
