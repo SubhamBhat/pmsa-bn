@@ -134,9 +134,11 @@ class PMSABatchNorm2d(nn.Module):
                 weighted_sum = (mask_k * x).sum(dim=[0, 2, 3])   # [C]
                 mu_k = weighted_sum / Nk[k]                       # [C]
 
-                # Weighted variance
+                # Weighted unbiased variance, 1 / (N_k - 1) (paper Eq. 6); for N_k <= 1
+                # it is never used, because the variance shrinkage weight eta_k is 0
                 residual = x - mu_k.view(1, C, 1, 1)             # [B, C, H, W]
-                var_k = (mask_k * residual.pow(2)).sum(dim=[0, 2, 3]) / Nk[k]
+                ss_k = (mask_k * residual.pow(2)).sum(dim=[0, 2, 3])
+                var_k = ss_k / (Nk[k] - 1.0) if Nk[k] > 1.0 else self.src_class_var[k]
 
                 tgt_mean[k] = mu_k
                 tgt_var[k]  = var_k

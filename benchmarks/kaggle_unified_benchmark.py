@@ -225,41 +225,26 @@ def _detect_modality(src):
                      f"Montgomery / Shenzhen / ISIC2018 / PH2 / BraTS2019")
 
 _MCFG = {
-    # fundus: 3-class; sophisticated sigmoid-tanh alpha schedule; ensemble PASS1; LoTV
+    # Shared PMSA-BN settings (paper, Sec. 3): theta_hi/theta_lo = 0.90/0.10,
+    # kappa_mu/kappa_sigma = 8/16, alpha_c = 1 - exp(-D_c / tau), two forward
+    # passes (pass 1 with the running statistics), no test-time augmentation.
+    # Only tau differs per source domain (see set_active_source).
     "fundus": dict(IMAGE_SIZE=384, NUM_CLASSES=3, CLASS_WEIGHTS=[0.2,1.5,3.0],
-                   ALPHA_TAU=0.5, ALPHA_MIN=0.35, ALPHA_MAX=0.90,
-                   KAPPA_MU=4.0, KAPPA_SIGMA=8.0, TAU_HI=0.25, TAU_LO=0.10,
-                   ALPHA_BN_WEIGHT=0.5, ALPHA_SCHEDULE="sigmoid_tanh",
-                   USE_BETWEEN_VAR=True, PASS1="ensemble",
-                   TENT_LR=1e-4, TENT_STEPS=10, USE_TTA=True),
-    # polyp: 2-class; ALPHA_MIN=0 (zero-shift stays on source); within-class variance only; 4-way TTA
+                   ALPHA_TAU=0.5, KAPPA_MU=8.0, KAPPA_SIGMA=16.0, TAU_HI=0.90, TAU_LO=0.10,
+                   ALPHA_BN_WEIGHT=0.5, TENT_LR=1e-4, TENT_STEPS=10),
     "polyp":  dict(IMAGE_SIZE=352, NUM_CLASSES=2, CLASS_WEIGHTS=[0.2,1.8],
-                   ALPHA_TAU=1.0, ALPHA_MIN=0.0,  ALPHA_MAX=0.45,
-                   KAPPA_MU=16.0, KAPPA_SIGMA=32.0, TAU_HI=0.50, TAU_LO=0.10,
-                   ALPHA_BN_WEIGHT=0.5, ALPHA_SCHEDULE="exp",
-                   USE_BETWEEN_VAR=False, PASS1="alpha",
-                   TENT_LR=1e-4, TENT_STEPS=10, USE_TTA=True),
-    # cxr: 2-class; fraction-based shrinkage; tanh schedule; LoTV
+                   ALPHA_TAU=1.0, KAPPA_MU=8.0, KAPPA_SIGMA=16.0, TAU_HI=0.90, TAU_LO=0.10,
+                   ALPHA_BN_WEIGHT=0.5, TENT_LR=1e-4, TENT_STEPS=10),
     "cxr":    dict(IMAGE_SIZE=256, NUM_CLASSES=2, CLASS_WEIGHTS=[0.4,1.6],
-                   ALPHA_TAU=0.5, ALPHA_MIN=0.20, ALPHA_MAX=0.70,
-                   KAPPA_MU=16.0, KAPPA_SIGMA=32.0, TAU_HI=0.50, TAU_LO=0.10,
-                   ALPHA_BN_WEIGHT=0.5, ALPHA_SCHEDULE="tanh",
-                   USE_BETWEEN_VAR=True, PASS1="alpha",
-                   TENT_LR=1e-4, TENT_STEPS=10, USE_TTA=True),
-    # derm: 2-class; conservative ALPHA_MAX=0.20; exp alpha schedule; within-class variance only; 3-way TTA
+                   ALPHA_TAU=0.5, KAPPA_MU=8.0, KAPPA_SIGMA=16.0, TAU_HI=0.90, TAU_LO=0.10,
+                   ALPHA_BN_WEIGHT=0.5, TENT_LR=1e-4, TENT_STEPS=10),
     "derm":   dict(IMAGE_SIZE=320, NUM_CLASSES=2, CLASS_WEIGHTS=[0.4,1.6],
-                   ALPHA_TAU=2.0, ALPHA_MIN=0.02, ALPHA_MAX=0.20,
-                   KAPPA_MU=8.0, KAPPA_SIGMA=16.0, TAU_HI=0.85, TAU_LO=0.15,
-                   ALPHA_BN_WEIGHT=0.5, ALPHA_SCHEDULE="exp",
-                   USE_BETWEEN_VAR=False, PASS1="source",
-                   TENT_LR=1e-4, TENT_STEPS=10, USE_TTA=True),
-    # brain: >3 class (4-class: 0=Bg, 1=NCR, 2=ED, 3=ET); LoTV disjoint tumor regions
+                   ALPHA_TAU=2.0, KAPPA_MU=8.0, KAPPA_SIGMA=16.0, TAU_HI=0.90, TAU_LO=0.10,
+                   ALPHA_BN_WEIGHT=0.5, TENT_LR=1e-4, TENT_STEPS=10),
+    # brain (4-class: 0=Bg, 1=NCR, 2=ED, 3=ET); same PMSA-BN settings
     "brain":  dict(IMAGE_SIZE=256, NUM_CLASSES=4, CLASS_WEIGHTS=[0.1, 1.5, 1.5, 2.0],
-                   ALPHA_TAU=0.5, ALPHA_MIN=0.10, ALPHA_MAX=0.80,
-                   KAPPA_MU=8.0, KAPPA_SIGMA=16.0, TAU_HI=0.30, TAU_LO=0.10,
-                   ALPHA_BN_WEIGHT=0.5, ALPHA_SCHEDULE="sigmoid_tanh",
-                   USE_BETWEEN_VAR=True, PASS1="ensemble",
-                   TENT_LR=1e-4, TENT_STEPS=10, USE_TTA=True),
+                   ALPHA_TAU=0.5, KAPPA_MU=8.0, KAPPA_SIGMA=16.0, TAU_HI=0.90, TAU_LO=0.10,
+                   ALPHA_BN_WEIGHT=0.5, TENT_LR=1e-4, TENT_STEPS=10),
 }
 
 def set_active_source(src):
@@ -1976,7 +1961,8 @@ def collect_source_stats(model, source_pairs):
             for k in range(K): gcnt[k] += (lbls==k).float().sum()
     for h in hooks: h.remove()
 
-    mu_all, va_all = [], []
+    # Eq. (4): class moments and per-layer proportions pi_k = S0[k] / sum_k' S0[k']
+    mu_all, va_all, pi_all = [], [], []
     for ac in accum:
         C = ac["sk"].shape[1]
         mu = torch.zeros(K, C); va = torch.ones(K, C)
@@ -1986,9 +1972,10 @@ def collect_source_stats(model, source_pairs):
                 mu[k] = ac["sk"][k] / n
                 va[k] = (ac["sk2"][k] / n - mu[k]**2).clamp(min=1e-6)
         mu_all.append(mu); va_all.append(va)
+        pi_all.append(ac["nk"] / ac["nk"].sum().clamp(min=1e-6))
 
-    prior = gcnt / gcnt.sum().clamp(min=1e-6)
-    stats = {"class_mean": mu_all, "class_var": va_all, "prior": prior}
+    prior = gcnt / gcnt.sum().clamp(min=1e-6)   # full-resolution proportions (logged only)
+    stats = {"class_mean": mu_all, "class_var": va_all, "prior": pi_all}
     sp = os.path.join(OUT_DIR, f"{SOURCE}_{BACKBONE}_source_stats.pth")
     torch.save(stats, sp)
     print(f"  Prior π: {dict(enumerate([round(x,3) for x in prior.tolist()]))}")
@@ -2004,26 +1991,21 @@ FULL_FLAGS = dict(class_split=True, shrinkage=True, prior_match=True, per_channe
 
 class PMSABatchNorm2d(nn.Module):
     """
-    Prior-Matched Shift-Adaptive BatchNorm (PMSA-BN).
-    A single universal implementation covering all modalities via MCFG.
-    Alpha scheduling is selected per modality:
-      - "sigmoid_tanh" (fundus): layer-shift gated tanh schedule
-      - "tanh"  (CXR):           tanh(Dc / 1.5τ)
-      - "exp"   (polyp, derm):   1 - exp(-Dc / τ) clamped to [amin, amax]
+    Prior-Matched Shift-Adaptive BatchNorm (PMSA-BN), exactly as in the paper:
+      Eq. (5)    average-pool the confident pseudo-masks to the layer grid
+      Eq. (6)    class-conditional sample mean / unbiased variance
+      Eqs. (7-8) pseudo-count shrinkage toward the source class statistics
+      Eq. (9)    prior matching with the source proportions (law of total variance)
+      Eq. (10)   normalized squared W2 shift D_c and alpha_c = 1 - exp(-D_c / tau)
+      Eqs. (11-12) linear mixing with the running statistics, frozen affine
     """
     def __init__(self, bn: nn.BatchNorm2d):
         super().__init__()
         K    = MCFG["NUM_CLASSES"]
-        tau  = MCFG["ALPHA_TAU"]
-        kmu  = MCFG["KAPPA_MU"]
-        ks   = MCFG["KAPPA_SIGMA"]
-        amin = MCFG["ALPHA_MIN"]
-        amax = MCFG["ALPHA_MAX"]
         self.bn = bn
         C = bn.num_features
-        self.K, self.tau, self.kmu, self.ks = K, tau, kmu, ks
-        self.amin, self.amax = amin, amax
-        self.schedule = MCFG["ALPHA_SCHEDULE"]
+        self.K, self.tau = K, MCFG["ALPHA_TAU"]
+        self.kmu, self.ks = MCFG["KAPPA_MU"], MCFG["KAPPA_SIGMA"]
         self.register_buffer("src_cls_mean", torch.zeros(K, C))
         self.register_buffer("src_cls_var",  torch.ones (K, C))
         self.register_buffer("src_prior",    torch.ones (K) / K)
@@ -2032,28 +2014,26 @@ class PMSABatchNorm2d(nn.Module):
         self.flags = dict(FULL_FLAGS)
 
     def _cls_stats(self, x, mask):
+        """Eqs. (5)-(6). Returns raw class statistics and the effective counts N_k."""
         B, C, H, W = x.shape
         m = F.adaptive_avg_pool2d(mask.float(), (H, W)).expand(B, -1, -1, -1)
-        Nk = m.sum(dim=[0, 2, 3]).clamp(min=1e-6)
+        Nk = m.sum(dim=[0, 2, 3])
         img_mu = x.mean([0, 2, 3])
         img_va = x.var ([0, 2, 3], unbiased=False).clamp(min=1e-6)
-        src_global_mu = (self.src_prior[:, None] * self.src_cls_mean).sum(0)
-        t_mu = torch.zeros(self.K, C, device=x.device)
-        t_va = torch.ones (self.K, C, device=x.device)
+        t_mu = self.src_cls_mean.clone()          # unused when N_k = 0 (gamma_k = 0)
+        t_va = self.src_cls_var.clone()           # unused when N_k <= 1 (eta_k = 0)
         for k in range(self.K):
-            mk = m[:, k:k+1]
-            if Nk[k] > 1e-3:
-                mk_n = mk / Nk[k]
+            n = Nk[k].item()
+            if n > 0:
+                mk_n = m[:, k:k+1] / n
                 t_mu[k] = (x * mk_n).sum([0, 2, 3])
-                t_va[k] = ((x**2 * mk_n).sum([0, 2, 3]) - t_mu[k]**2).clamp(min=1e-6)
-            else:
-                # class-offset fallback (prevents background collapse for rare classes)
-                t_mu[k] = img_mu + (self.src_cls_mean[k] - src_global_mu)
-                t_va[k] = self.src_cls_var[k]
+                if n > 1:
+                    biased = ((x - t_mu[k].view(1, C, 1, 1))**2 * mk_n).sum([0, 2, 3])
+                    t_va[k] = (biased * n / (n - 1.0)).clamp(min=1e-6)
         return t_mu, t_va, Nk, img_mu, img_va
 
     def _shrink(self, tgt_mu, tgt_va, Nk, img_mu, img_va):
-        src_global_mu = (self.src_prior[:, None] * self.src_cls_mean).sum(0)
+        """Eqs. (7)-(8): shrink toward the source class statistics."""
         shr_mu = torch.zeros_like(tgt_mu)
         shr_va = torch.zeros_like(tgt_va)
         for k in range(self.K):
@@ -2061,48 +2041,26 @@ class PMSABatchNorm2d(nn.Module):
             g_mu = n_eff / (n_eff + self.kmu)
             n1   = max(0.0, n_eff - 1.0)
             g_va = n1 / (n1 + self.ks)
-            # Resolution-invariant class-offset anchor (fundus/polyp/derm)
-            anchor_mu = img_mu + (self.src_cls_mean[k] - src_global_mu)
-            shr_mu[k] = g_mu * tgt_mu[k] + (1.0 - g_mu) * anchor_mu
+            shr_mu[k] = g_mu * tgt_mu[k] + (1.0 - g_mu) * self.src_cls_mean[k]
             shr_va[k] = g_va * tgt_va[k] + (1.0 - g_va) * self.src_cls_var[k]
         return shr_mu, shr_va
 
     def _prior_match(self, shr_mu, shr_va, Nk):
-        pi_hat = Nk / Nk.sum().clamp(min=1e-6)
-        pi = 0.5 * self.src_prior + 0.5 * pi_hat
-        pi = (pi / pi.sum()).unsqueeze(1)
+        """Eq. (9): recombine with the source proportions (law of total variance)."""
+        pi = self.src_prior.unsqueeze(1)
         pm_mu = (pi * shr_mu).sum(0)
-        if MCFG.get("USE_BETWEEN_VAR", False):
-            # Law of Total Variance: E[Var] + Var[E]
-            pm_va = ((pi * shr_va).sum(0) +
-                     (pi * (shr_mu - pm_mu.unsqueeze(0))**2).sum(0)).clamp(min=1e-6)
-        else:
-            # Within-class variance only (vital for dermoscopy & polyp to prevent contrast suppression)
-            pm_va = (pi * shr_va).sum(0).clamp(min=1e-6)
+        pm_va = ((pi * shr_va).sum(0) +
+                 (pi * (shr_mu - pm_mu.unsqueeze(0))**2).sum(0)).clamp(min=1e-6)
         return pm_mu, pm_va
 
-    def _w2(self, pm_mu, pm_va, src_mu, src_va, eps=1e-6):
+    def _w2(self, pm_mu, pm_va, src_mu, src_va, eps=1e-5):
+        """Eq. (10): squared 2-Wasserstein distance normalized by the running variance."""
         return ((pm_mu - src_mu)**2 +
                 (pm_va.clamp(0).sqrt() - src_va.clamp(0).sqrt())**2) / (src_va + eps)
 
     def _alpha(self, Dc):
-        amin, amax, tau = self.amin, self.amax, self.tau
-        if self.schedule == "sigmoid_tanh":
-            # Fundus: normalised-tanh with sigmoid layer-shift gating
-            dc_mean = Dc.mean().detach()
-            dc_std  = Dc.std().detach().clamp(min=1e-6)
-            dev = (Dc - dc_mean) / (tau * dc_std)
-            layer_shift = torch.sigmoid((dc_mean - 1.2) / 0.8)
-            center = amin + (amax - amin) * (0.35 + 0.45 * layer_shift)
-            half_span = torch.min(center - amin, amax - center)
-            return torch.clamp(center + half_span * torch.tanh(dev), amin, amax)
-        elif self.schedule == "tanh":
-            # CXR: simpler tanh
-            return torch.clamp(amin + (amax - amin) * torch.tanh(Dc / (1.5 * tau)), amin, amax)
-        else:
-            # Derm/Polyp: exponential saturation smoothly mapped to [amin, amax]
-            raw = 1.0 - torch.exp(-Dc / tau)
-            return (amin + (amax - amin) * raw).clamp(amin, amax)
+        """Eq. (10): alpha_c = 1 - exp(-D_c / tau)."""
+        return 1.0 - torch.exp(-Dc / self.tau)
 
     def forward(self, x):
         if not self.adapt_mode or self.pseudo_mask is None:
@@ -2126,8 +2084,10 @@ class PMSABatchNorm2d(nn.Module):
                 if f["prior_match"]:
                     pm_mu, pm_va = self._prior_match(t_mu, t_va, Nk)
                 else:
-                    pm_mu = (Nk[:,None] * t_mu).sum(0) / Nk.sum().clamp(1e-6)
-                    pm_va = (Nk[:,None] * t_va).sum(0) / Nk.sum().clamp(1e-6)
+                    pi_t = (Nk / Nk.sum().clamp(min=1e-6)).unsqueeze(1)
+                    pm_mu = (pi_t * t_mu).sum(0)
+                    pm_va = ((pi_t * t_va).sum(0) +
+                             (pi_t * (t_mu - pm_mu.unsqueeze(0))**2).sum(0)).clamp(min=1e-6)
 
             Dc = self._w2(pm_mu, pm_va, src_mu, src_va)
             if not f.get("per_channel", True):
@@ -2171,10 +2131,13 @@ def _inject_stats(model, stats):
             f"but source stats file contains {len(stats['class_mean'])} layers.\n"
             f"Ensure source statistics were generated with the matching backbone '{BACKBONE}'."
         )
-    for lyr, mu, va in zip(pmsa, stats["class_mean"], stats["class_var"]):
+    priors = stats["prior"]
+    if torch.is_tensor(priors):                 # older stats files: one global pi
+        priors = [priors] * len(pmsa)
+    for lyr, mu, va, pi in zip(pmsa, stats["class_mean"], stats["class_var"], priors):
         lyr.src_cls_mean.copy_(mu.to(dev))
         lyr.src_cls_var.copy_(va.to(dev))
-        lyr.src_prior.copy_(stats["prior"].to(dev))
+        lyr.src_prior.copy_(pi.to(dev))
     return len(pmsa)
 
 
@@ -2200,19 +2163,27 @@ def _bn_restore(snap):
 # ╚══════════════════════════════════════════════════════════════════════════╝
 
 def _make_soft_mask(probs):
-    """Build confidence-thresholded pseudo-mask for PMSA-BN conditioning."""
-    if probs.shape[1] == 2:
-        tau_hi = MCFG["TAU_HI"]; tau_lo = MCFG["TAU_LO"]
-        mask = torch.zeros_like(probs)
-        mask[:, 1:2] = (probs[:, 1:2] > tau_hi).float()
-        mask[:, 0:1] = (probs[:, 1:2] < tau_lo).float()
-        return mask
+    """Confident pseudo-masks M_k of Sec. 2.2 (one binary map per class).
+
+    Foreground class k: argmax = k and P_k > theta_hi.  Background: P_k < theta_lo
+    for every foreground class.  Ambiguous pixels belong to no mask.  Fundus
+    (bg, rim, cup) is nested: outer disc = {P_rim + P_cup > theta_hi}, cup is
+    restricted to the disc, rim = disc minus cup.
+    """
+    t_hi, t_lo = MCFG["TAU_HI"], MCFG["TAU_LO"]
+    K = probs.shape[1]
+    mask = torch.zeros_like(probs)
+    mask[:, 0] = (probs[:, 1:] < t_lo).all(dim=1).float()
+    if MODALITY == "fundus" and K == 3:
+        disc = (probs[:, 1] + probs[:, 2]) > t_hi
+        cup  = (probs.argmax(dim=1) == 2) & (probs[:, 2] > t_hi) & disc
+        mask[:, 1] = (disc & ~cup).float()
+        mask[:, 2] = cup.float()
     else:
-        # 3-class (fundus): calibrated soft probs
-        disc = (probs[:, 1:2] + probs[:, 2:3]).clamp(0, 1)
-        cup  = probs[:, 2:3] * disc
-        soft = torch.cat([probs[:, 0:1], probs[:, 1:2], cup], dim=1)
-        return soft / soft.sum(dim=1, keepdim=True).clamp(min=1e-6)
+        arg = probs.argmax(dim=1)
+        for k in range(1, K):
+            mask[:, k] = ((arg == k) & (probs[:, k] > t_hi)).float()
+    return mask
 
 
 @torch.no_grad()
@@ -2290,343 +2261,6 @@ class TENTAdapter:
             return F.softmax(m(imgs), dim=1)
 
 
-def _calibrate_polyp(p_pmsa, src_model, imgs, preds_cache=None, target_name=None):
-    """
-    Polyp-specific anatomical prior calibration with target-specific Bayesian ensemble:
-    1. Multi-representation adaptive consensus:
-       - ClinicDB source -> Kvasir (0.7524 ★) & ETIS (0.4703 ★) clean sweeps preserved.
-       - Kvasir source -> ClinicDB & ETIS (severe shift):
-         Anchored to α=0.90 (0.4160 on ClinicDB, 0.2634 on ETIS), TENT, and AdaBN,
-         eliminating the drag from unadapted source and low-alpha models.
-    2. Endoscopic specular reflection and mucosal vascular hole filling (ndi.binary_fill_holes):
-       Heals light glare washouts and mucosal vascular hollows.
-    3. Spatial component filtering:
-       Prunes tiny isolated noise artifacts (< 16 pixels).
-    4. Smooth continuous probability formulation:
-       Preserves sub-pixel edge gradients for 4-way TTA fusion.
-    """
-    B = p_pmsa.shape[0]
-    tname = (target_name or "").lower()
-    sname = (SOURCE or "").lower()
-
-    def _get(key, fn):
-        if preds_cache and key in preds_cache and preds_cache[key] is not None:
-            return preds_cache[key]
-        return fn()
-
-    p_alp5 = _get("alp_0.5", lambda: predict_alpha_bn(src_model, imgs, alpha=0.5))
-    p_alp3 = _get("alp_0.3", lambda: predict_alpha_bn(src_model, imgs, alpha=0.3))
-    p_alp9 = _get("alp_0.9", lambda: predict_alpha_bn(src_model, imgs, alpha=0.9))
-    p_ada  = _get("ada",     lambda: predict_adabn(src_model, imgs))
-    p_src  = _get("src",     lambda: predict_source_only(src_model, imgs))
-    p_tent = preds_cache.get("tent") if preds_cache else None
-
-    if "kvasir" in sname:
-        # Kvasir source transfer: α=0.90, AdaBN, and TENT lead all baselines on ClinicDB & ETIS
-        if p_tent is not None:
-            p_fused = 0.35 * p_pmsa + 0.35 * p_alp9 + 0.15 * p_tent + 0.15 * p_ada
-        else:
-            p_fused = 0.40 * p_pmsa + 0.35 * p_alp9 + 0.25 * p_ada
-    elif "kvasir" in tname:
-        # ClinicDB source -> Kvasir target (Proven clean win: 0.7524 ★)
-        p_fused = 0.65 * p_alp5 + 0.25 * p_alp3 + 0.10 * p_pmsa
-    elif "etis" in tname:
-        # ClinicDB source -> ETIS target (Proven massive win: 0.4703 ★)
-        p_fused = 0.45 * p_pmsa + 0.30 * p_alp5 + 0.15 * p_alp3 + 0.10 * p_src
-    else:
-        # ClinicDB default
-        p_fused = 0.45 * p_pmsa + 0.30 * p_alp3 + 0.15 * p_alp5 + 0.10 * p_src
-
-    out_list = []
-    for b in range(B):
-        fg_prob = p_fused[b, 1].cpu().numpy()
-        bin_mask = fg_prob > 0.48
-
-        if bin_mask.any():
-            # 1. Fill internal specular reflections and mucosal vascular hollows
-            filled = ndi.binary_fill_holes(bin_mask)
-            holes = filled & (~bin_mask)
-
-            # 2. Filter tiny isolated noise speckles (< 16 pixels) without deleting small polyps
-            labeled, num_features = ndi.label(filled)
-            if num_features > 1:
-                sizes = ndi.sum(filled, labeled, range(1, num_features + 1))
-                keep = [i + 1 for i, s in enumerate(sizes) if s >= 16]
-                clean = np.isin(labeled, keep) if keep else filled
-            else:
-                clean = filled
-
-            calibrated_fg = p_fused[b, 1].clone()
-            if holes.any():
-                hole_t = torch.from_numpy(holes).to(p_pmsa.device)
-                calibrated_fg = torch.where(hole_t, torch.maximum(calibrated_fg, torch.tensor(0.75, device=p_pmsa.device)), calibrated_fg)
-            noise = (~clean) & bin_mask
-            if noise.any():
-                noise_t = torch.from_numpy(noise).to(p_pmsa.device)
-                calibrated_fg = torch.where(noise_t, torch.minimum(calibrated_fg, torch.tensor(0.20, device=p_pmsa.device)), calibrated_fg)
-        else:
-            calibrated_fg = p_fused[b, 1]
-
-        calibrated_bg = 1.0 - calibrated_fg
-        out_b = torch.stack([calibrated_bg, calibrated_fg], dim=0)
-        out_list.append(out_b.unsqueeze(0))
-
-    return torch.cat(out_list, dim=0)
-
-
-def _calibrate_derm(p_pmsa, src_model, imgs, preds_cache=None, target_name=None):
-    """
-    Cutaneous lesion anatomical calibration with target-specific Bayesian ensemble:
-    1. Multi-representation adaptive consensus:
-       - On HAM10000: α=0.10 is the strongest empirical anchor (0.9015), reinforced by
-         Source Only (0.8988), α=0.30 (0.8994), and PMSA posterior.
-       - On PH2: Source Only is the optimal representation (0.9070), reinforced by
-         α=0.10 (0.9059) and PMSA posterior.
-       - On Derm7pt: TENT (0.4323) provides superior sensitivity while Source Only (0.3432 Jac)
-         and AdaBN/α=0.10 provide boundary fidelity.
-    2. Morphological void & occlusion filling (ndi.binary_fill_holes):
-       Heals traversing hair artifacts, gel air bubbles, and central hypopigmentation.
-    3. Spatial component filtering:
-       Suppresses isolated spurious peripheral artifacts (< 25 pixels).
-    4. Smooth continuous probability formulation:
-       Avoids destructive hard binarization, preserving edge gradients for TTA fusion.
-    """
-    B = p_pmsa.shape[0]
-    tname = (target_name or "").lower()
-
-    def _get(key, fn):
-        if preds_cache and key in preds_cache and preds_cache[key] is not None:
-            return preds_cache[key]
-        return fn()
-
-    p_src  = _get("src",     lambda: predict_source_only(src_model, imgs))
-    p_alp1 = _get("alp_0.1", lambda: predict_alpha_bn(src_model, imgs, alpha=0.1))
-    p_alp3 = _get("alp_0.3", lambda: predict_alpha_bn(src_model, imgs, alpha=0.3))
-
-    if "ph2" in tname:
-        # PH2: Source Only (0.9070) and α=0.1 (0.9059) are the dominant anchors
-        p_fused = 0.50 * p_src + 0.35 * p_alp1 + 0.15 * p_pmsa
-    elif "derm7pt" in tname or "7pt" in tname:
-        # Derm7pt: TENT provides optimal recall (0.4323), Source provides top Jaccard (0.3432)
-        p_tent = preds_cache.get("tent") if preds_cache else None
-        p_ada  = _get("ada", lambda: predict_adabn(src_model, imgs))
-        if p_tent is not None:
-            p_fused = 0.35 * p_tent + 0.30 * p_src + 0.20 * p_ada + 0.10 * p_alp1 + 0.05 * p_pmsa
-        else:
-            p_fused = 0.40 * p_ada + 0.35 * p_src + 0.15 * p_alp1 + 0.10 * p_pmsa
-    elif "isic" in tname or "2018" in tname:
-        # ISIC 2018 Reverse Transfer (PH2 -> ISIC 2018):
-        # α=0.30 (0.8784) and α=0.10 (0.8774) are dominant empirical anchors
-        p_fused = 0.45 * p_alp3 + 0.35 * p_pmsa + 0.20 * p_alp1
-    else:
-        # HAM10000 / Default dermoscopy: α=0.10 is the dominant anchor (0.9015)
-        p_fused = 0.45 * p_alp1 + 0.30 * p_src + 0.15 * p_alp3 + 0.10 * p_pmsa
-
-    out_list = []
-    for b in range(B):
-        fg_prob = p_fused[b, 1].cpu().numpy()
-        bin_mask = fg_prob > 0.49
-
-        if bin_mask.any():
-            # 1. Fill internal hair occlusions, air bubbles, and pigment voids
-            filled = ndi.binary_fill_holes(bin_mask)
-            # 2. Filter tiny isolated noise speckles (< 25 pixels)
-            labeled, num_features = ndi.label(filled)
-            if num_features > 1:
-                sizes = ndi.sum(filled, labeled, range(1, num_features + 1))
-                max_s = sizes.max()
-                keep = [i + 1 for i, s in enumerate(sizes) if s >= max(25, 0.10 * max_s)]
-                clean = np.isin(labeled, keep) if keep else filled
-            else:
-                clean = filled
-            refined = torch.from_numpy(clean.astype(np.float32)).to(p_pmsa.device)
-            # Soft continuous probability combination (preserves boundary gradients)
-            calibrated_fg = torch.clamp(0.70 * p_fused[b, 1] + 0.30 * refined, 0.0, 1.0)
-        else:
-            calibrated_fg = p_fused[b, 1]
-
-        calibrated_bg = 1.0 - calibrated_fg
-        out_b = torch.stack([calibrated_bg, calibrated_fg], dim=0)
-        out_list.append(out_b.unsqueeze(0))
-
-    return torch.cat(out_list, dim=0)
-
-
-
-
-def _calibrate_cxr(p_pmsa, src_model, imgs, preds_cache=None):
-    """
-    Chest X-ray bilateral pulmonary anatomical calibration:
-    1. Multi-alpha adaptive representation fusion (α=0.30, α=0.50)
-    2. Intra-parenchymal vascular hole filling (ndi.binary_fill_holes)
-    3. Bilateral lung lobe component retention (two largest connected components)
-    """
-    B = p_pmsa.shape[0]
-    if preds_cache is None:
-        p_alp5 = predict_alpha_bn(src_model, imgs, alpha=0.5)
-        p_alp3 = predict_alpha_bn(src_model, imgs, alpha=0.3)
-        p_src  = predict_source_only(src_model, imgs)
-    else:
-        p_src  = preds_cache.get("src") if "src" in preds_cache else predict_source_only(src_model, imgs)
-        p_alp3 = preds_cache.get("alp_0.3") if "alp_0.3" in preds_cache else predict_alpha_bn(src_model, imgs, alpha=0.3)
-        p_alp5 = preds_cache.get("alp_0.5") if "alp_0.5" in preds_cache else predict_alpha_bn(src_model, imgs, alpha=0.5)
-
-    p_fused = 0.45 * p_pmsa + 0.30 * p_alp5 + 0.15 * p_alp3 + 0.10 * p_src
-
-    out_list = []
-    for b in range(B):
-        fg_prob = p_fused[b, 1].cpu().numpy()
-        bin_mask = fg_prob > 0.48
-
-        if bin_mask.any():
-            filled = ndi.binary_fill_holes(bin_mask)
-            labeled, num_features = ndi.label(filled)
-            if num_features > 2:
-                sizes = ndi.sum(filled, labeled, range(1, num_features + 1))
-                top2_idx = np.argsort(sizes)[-2:] + 1
-                clean = np.isin(labeled, top2_idx)
-            else:
-                clean = filled
-            refined = torch.from_numpy(clean.astype(np.float32)).to(p_pmsa.device)
-            calibrated_fg = torch.clamp(0.60 * p_fused[b, 1] + 0.40 * refined, 0.0, 1.0)
-        else:
-            calibrated_fg = p_fused[b, 1]
-
-        calibrated_bg = 1.0 - calibrated_fg
-        out_b = torch.stack([calibrated_bg, calibrated_fg], dim=0)
-        out_list.append(out_b.unsqueeze(0))
-
-    return torch.cat(out_list, dim=0)
-
-
-def _calibrate_fundus(p_pmsa, src_model, imgs, preds_cache=None, target_name=None):
-    """
-    Ophthalmic anatomical prior calibration and multi-hypothesis adaptive boundary alignment:
-    1. Outer Disc Perimeter:
-       - Fuses PMSA-BN and top adaptive baselines with clean anatomical priors.
-       - Enforces strict single connected component selection for the optic disc (exactly 1 disc per eye),
-         completely eliminating stray peripheral false positives from drusen or peripapillary atrophy.
-       - Morphological hole filling (ndi.binary_fill_holes) heals traversing retinal vessel
-         gaps that ground truth consensus includes within the optic disc.
-    2. Optic Cup Biomarker:
-       - Fuses PMSA-BN Bayesian shrinkage with top adaptive cup representations.
-       - Strict anatomical containment: the cup is constrained inside the verified disc perimeter.
-       - Enforces strict single connected component selection for the optic cup.
-       - Morphological hole filling heals central vascular hollows, ensuring contiguous cup geometry.
-    """
-    tname = (target_name or "").lower()
-    B = p_pmsa.shape[0]
-
-    def _get(key, fn):
-        if preds_cache and key in preds_cache and preds_cache[key] is not None:
-            return preds_cache[key]
-        return fn()
-
-    p_ada  = _get("ada",     lambda: predict_adabn(src_model, imgs))
-    p_alp9 = _get("alp_0.9", lambda: predict_alpha_bn(src_model, imgs, alpha=0.9))
-    p_alp7 = _get("alp_0.7", lambda: predict_alpha_bn(src_model, imgs, alpha=0.7))
-    p_alp5 = _get("alp_0.5", lambda: predict_alpha_bn(src_model, imgs, alpha=0.5))
-    p_alp3 = _get("alp_0.3", lambda: predict_alpha_bn(src_model, imgs, alpha=0.3))
-    p_tent = preds_cache.get("tent") if preds_cache else None
-
-    # Disc probabilities: (rim + cup)
-    d_pmsa = (p_pmsa[:, 1:2] + p_pmsa[:, 2:3]).clamp(0.0, 1.0)
-    d_ada  = (p_ada [:, 1:2] + p_ada [:, 2:3]).clamp(0.0, 1.0)
-    d_alp9 = (p_alp9[:, 1:2] + p_alp9[:, 2:3]).clamp(0.0, 1.0)
-    d_alp7 = (p_alp7[:, 1:2] + p_alp7[:, 2:3]).clamp(0.0, 1.0)
-    d_alp5 = (p_alp5[:, 1:2] + p_alp5[:, 2:3]).clamp(0.0, 1.0)
-    d_alp3 = (p_alp3[:, 1:2] + p_alp3[:, 2:3]).clamp(0.0, 1.0)
-    d_tent = (p_tent[:, 1:2] + p_tent[:, 2:3]).clamp(0.0, 1.0) if p_tent is not None else None
-
-    # Cup probabilities: channel 2
-    c_pmsa = p_pmsa[:, 2:3].clamp(0.0, 1.0)
-    c_ada  = p_ada [:, 2:3].clamp(0.0, 1.0)
-    c_alp9 = p_alp9[:, 2:3].clamp(0.0, 1.0)
-    c_alp7 = p_alp7[:, 2:3].clamp(0.0, 1.0)
-    c_alp5 = p_alp5[:, 2:3].clamp(0.0, 1.0)
-    c_alp3 = p_alp3[:, 2:3].clamp(0.0, 1.0)
-    c_tent = p_tent[:, 2:3].clamp(0.0, 1.0) if p_tent is not None else None
-
-    if "origa" in tname:
-        # ORIGA: TENT (0.8974 disc), α=0.9 (0.8959 disc), AdaBN (0.8914 disc) lead Disc;
-        # α=0.3 (0.7808 cup), α=0.5 (0.7745 cup), TENT (0.7695 cup) lead Cup.
-        if d_tent is not None:
-            p_disc_fused = 0.35 * d_tent + 0.30 * d_alp9 + 0.20 * d_ada + 0.15 * d_pmsa
-            p_cup_fused  = 0.35 * c_alp3 + 0.25 * c_tent + 0.20 * c_alp5 + 0.20 * c_pmsa
-        else:
-            p_disc_fused = 0.40 * d_alp9 + 0.35 * d_ada + 0.25 * d_pmsa
-            p_cup_fused  = 0.45 * c_alp3 + 0.30 * c_alp5 + 0.25 * c_pmsa
-        disc_thresh = 0.48
-        cup_thresh  = 0.48
-
-    elif "g1020" in tname:
-        # G1020: TENT (0.8091 disc, 0.5304 cup), α=0.9 (0.7951 disc), AdaBN (0.7946 disc) lead Disc;
-        # TENT, α=0.5 (0.5296 cup), α=0.7 (0.5221 cup) lead Cup. Source Only is very poor (0.6308 disc).
-        if d_tent is not None:
-            p_disc_fused = 0.45 * d_tent + 0.25 * d_alp9 + 0.15 * d_ada + 0.15 * d_pmsa
-            p_cup_fused  = 0.40 * c_tent + 0.25 * c_alp5 + 0.20 * c_alp7 + 0.15 * c_pmsa
-        else:
-            p_disc_fused = 0.45 * d_alp9 + 0.35 * d_ada + 0.20 * d_pmsa
-            p_cup_fused  = 0.40 * c_alp5 + 0.35 * c_alp7 + 0.25 * c_pmsa
-        disc_thresh = 0.48
-        cup_thresh  = 0.48
-
-    else:
-        # Drishti-GS, RIM-ONE, PAPILA: Keep the exact fusion that produced decisive clean sweeps
-        disc_adapt_max = torch.maximum(d_ada, d_alp7)
-        p_disc_fused = (0.50 * d_pmsa + 0.50 * disc_adapt_max).clamp(0.0, 1.0)
-        cup_adapt_max = torch.maximum(c_ada, c_alp7)
-        p_cup_fused = (0.50 * c_pmsa + 0.50 * cup_adapt_max).clamp(0.0, 1.0)
-        disc_thresh = 0.48
-        cup_thresh  = 0.48
-
-    out_list = []
-    for b in range(B):
-        # Refine Disc: vessel hole filling and single dominant optic disc component
-        disc_b = p_disc_fused[b, 0] > disc_thresh
-        mask_np = disc_b.cpu().numpy().astype(bool)
-        if mask_np.any():
-            filled = ndi.binary_fill_holes(mask_np)
-            labeled, num_features = ndi.label(filled)
-            if num_features > 1:
-                sizes = ndi.sum(filled, labeled, range(1, num_features + 1))
-                # Retain strictly the single dominant optic disc component
-                clean = (labeled == (np.argmax(sizes) + 1))
-            else:
-                clean = filled
-            is_disc_b = torch.from_numpy(clean.astype(bool)).to(p_pmsa.device)
-        else:
-            is_disc_b = disc_b
-
-        # Refine Cup: strictly contained inside verified disc with fill holes & single component
-        cup_b = is_disc_b & (p_cup_fused[b, 0] > cup_thresh)
-        cup_np = cup_b.cpu().numpy().astype(bool)
-        if cup_np.any():
-            cup_filled = ndi.binary_fill_holes(cup_np)
-            labeled_c, num_c = ndi.label(cup_filled)
-            if num_c > 1:
-                sizes_c = ndi.sum(cup_filled, labeled_c, range(1, num_c + 1))
-                clean_c = (labeled_c == (np.argmax(sizes_c) + 1))
-            else:
-                clean_c = cup_filled
-            is_cup_b = torch.from_numpy(clean_c.astype(bool)).to(p_pmsa.device) & is_disc_b
-        else:
-            is_cup_b = cup_b
-
-        is_rim_b = is_disc_b & (~is_cup_b)
-
-        out_bg  = torch.where(is_disc_b, torch.zeros_like(p_disc_fused[b, 0]), torch.full_like(p_disc_fused[b, 0], 2.0))
-        out_rim = torch.where(is_rim_b,  torch.full_like(p_disc_fused[b, 0], 2.0), torch.zeros_like(p_disc_fused[b, 0]))
-        out_cup = torch.where(is_cup_b,  torch.full_like(p_disc_fused[b, 0], 2.0), torch.zeros_like(p_disc_fused[b, 0]))
-
-        out_b = torch.stack([out_bg, out_rim, out_cup], dim=0)
-        out_b = out_b / out_b.sum(dim=0, keepdim=True).clamp(min=1e-6)
-        out_list.append(out_b.unsqueeze(0))
-
-    return torch.cat(out_list, dim=0)
-
-
-
 @torch.no_grad()
 def predict_pmsa_ablation(pmsa_model, src_model, imgs, em_iters=1, flags=FULL_FLAGS):
     """
@@ -2662,80 +2296,23 @@ def predict_pmsa_ablation(pmsa_model, src_model, imgs, em_iters=1, flags=FULL_FL
 
 @torch.no_grad()
 def predict_pmsa(pmsa_model, src_model, imgs, em_iters=1, use_tta=None, preds_cache=None, target_name=None):
-    """Full PMSA-BN prediction with modality-calibrated multi-alpha adaptation and TTA."""
-    use_tta = MCFG["USE_TTA"] if use_tta is None else use_tta
+    """PMSA-BN as in the paper: two forward passes, no post-processing, no TTA.
+
+    Pass 1: the source model with its running statistics gives P^(0) and the
+    confident pseudo-masks.  Pass 2: PMSA-BN normalizes every BN layer in
+    forward order; its arg max is the prediction.  (use_tta and target_name are
+    accepted for call compatibility and ignored.)
+    """
     _set_flags(pmsa_model, FULL_FLAGS)
-
-    def _single(img_batch, pc=None, tname=None):
-        pass1_mode = MCFG.get("PASS1", "source")
-        if pass1_mode == "ensemble":
-            p_ada = pc.get("ada") if pc and "ada" in pc else predict_adabn(src_model, img_batch)
-            tn = (tname or "").lower()
-            if "g1020" in tn or "origa" in tn:
-                p_alp = pc.get("alp_0.9") if pc and "alp_0.9" in pc else predict_alpha_bn(src_model, img_batch, alpha=0.9)
-            else:
-                p_alp = pc.get("alp_0.3") if pc and "alp_0.3" in pc else predict_alpha_bn(src_model, img_batch, alpha=0.3)
-            p1 = 0.5 * p_ada + 0.5 * p_alp
-        elif pass1_mode == "alpha":
-            src_lo = (SOURCE or "").lower()
-            if "kvasir" in src_lo:
-                p1 = pc.get("alp_0.9") if pc and "alp_0.9" in pc else predict_alpha_bn(src_model, img_batch, alpha=0.9)
-            elif "kvasir" in (tname or "").lower():
-                p1 = pc.get("alp_0.5") if pc and "alp_0.5" in pc else predict_alpha_bn(src_model, img_batch, alpha=0.5)
-            else:
-                p1 = pc.get("alp_0.3") if pc and "alp_0.3" in pc else predict_alpha_bn(src_model, img_batch, alpha=0.3)
-        else:
-            if "isic" in (tname or "").lower() or "2018" in (tname or "").lower():
-                p1 = pc.get("alp_0.3") if pc and "alp_0.3" in pc else predict_alpha_bn(src_model, img_batch, alpha=0.3)
-            else:
-                p1 = pc.get("src") if pc and "src" in pc else predict_source_only(src_model, img_batch)
-
-        mask = _make_soft_mask(p1)
-        _set_adapt(pmsa_model, True); _set_mask(pmsa_model, mask)
-        probs = F.softmax(pmsa_model(img_batch), dim=1)
-        for _ in range(em_iters - 1):
-            mask = _make_soft_mask(probs); _set_mask(pmsa_model, mask)
-            probs = F.softmax(pmsa_model(img_batch), dim=1)
-        _set_adapt(pmsa_model, False); _set_mask(pmsa_model, None)
-
-        if MODALITY == "fundus":
-            probs = _calibrate_fundus(probs, src_model, img_batch, preds_cache=pc, target_name=tname)
-        elif MODALITY == "polyp":
-            probs = _calibrate_polyp(probs, src_model, img_batch, preds_cache=pc, target_name=tname)
-        elif MODALITY == "derm":
-            probs = _calibrate_derm(probs, src_model, img_batch, preds_cache=pc, target_name=tname)
-        elif MODALITY == "cxr":
-            probs = _calibrate_cxr(probs, src_model, img_batch, preds_cache=pc)
-        return probs
-
-    p_orig = _single(imgs, pc=preds_cache, tname=target_name)
-    if not use_tta:
-        return p_orig
-
-    if MODALITY == "polyp":
-        # 4-way TTA: original, horizontal flip, vertical flip, horizontal+vertical flip
-        img_h  = torch.flip(imgs, dims=[3])
-        pc_h   = {k: torch.flip(v, dims=[3]) if isinstance(v, torch.Tensor) else v for k, v in preds_cache.items()} if preds_cache else None
-        p_h    = torch.flip(_single(img_h, pc=pc_h, tname=target_name), dims=[3])
-        img_v  = torch.flip(imgs, dims=[2])
-        pc_v   = {k: torch.flip(v, dims=[2]) if isinstance(v, torch.Tensor) else v for k, v in preds_cache.items()} if preds_cache else None
-        p_v    = torch.flip(_single(img_v, pc=pc_v, tname=target_name), dims=[2])
-        img_hv = torch.flip(imgs, dims=[2, 3])
-        pc_hv  = {k: torch.flip(v, dims=[2, 3]) if isinstance(v, torch.Tensor) else v for k, v in preds_cache.items()} if preds_cache else None
-        p_hv   = torch.flip(_single(img_hv, pc=pc_hv, tname=target_name), dims=[2, 3])
-        return 0.55 * p_orig + 0.15 * p_h + 0.15 * p_v + 0.15 * p_hv
-    elif MODALITY == "derm":
-        # Dermoscopy: Horizontal flip TTA (preserves vertical illumination & hair orientation)
-        imgs_flip = torch.flip(imgs, dims=[3])
-        pc_flip   = {k: torch.flip(v, dims=[3]) if isinstance(v, torch.Tensor) else v for k, v in preds_cache.items()} if preds_cache else None
-        p_flip    = torch.flip(_single(imgs_flip, pc=pc_flip, tname=target_name), dims=[3])
-        return 0.70 * p_orig + 0.30 * p_flip
-    else:
-        # CXR / Fundus: horizontal flip TTA
-        imgs_flip = torch.flip(imgs, dims=[3])
-        pc_flip   = {k: torch.flip(v, dims=[3]) if isinstance(v, torch.Tensor) else v for k, v in preds_cache.items()} if preds_cache else None
-        p_flip    = torch.flip(_single(imgs_flip, pc=pc_flip, tname=target_name), dims=[3])
-        return 0.60 * p_orig + 0.40 * p_flip
+    p1 = preds_cache.get("src") if preds_cache and "src" in preds_cache else predict_source_only(src_model, imgs)
+    mask = _make_soft_mask(p1)
+    _set_adapt(pmsa_model, True); _set_mask(pmsa_model, mask)
+    probs = F.softmax(pmsa_model(imgs), dim=1)
+    for _ in range(em_iters - 1):
+        mask = _make_soft_mask(probs); _set_mask(pmsa_model, mask)
+        probs = F.softmax(pmsa_model(imgs), dim=1)
+    _set_adapt(pmsa_model, False); _set_mask(pmsa_model, None)
+    return probs
 
 
 # ╔══════════════════════════════════════════════════════════════════════════╗
