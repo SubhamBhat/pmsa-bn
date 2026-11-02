@@ -603,7 +603,7 @@ The figure below was Fig. 2 of the paper draft; it is kept here to save space in
 
 ## 5. Results
 
-All results: single-image adaptation ($`B=1`$), mean of three seeds, hyperparameters chosen **without target data** ($`\theta_{hi}/\theta_{lo}=0.9/0.1`$, $`\kappa_\mu/\kappa_\sigma=8/16`$, $`\tau`$ per source domain). PMSA-BN's gain over the best baseline is positive in every seed (mean seed standard deviation 0.04 points).
+All results: single-image adaptation ($`B=1`$), mean of three seeds, hyperparameters chosen **without target data** ([justification](#hyperparameters-values-and-justification); $`\theta_{hi}/\theta_{lo}=0.9/0.1`$, $`\kappa_\mu/\kappa_\sigma=8/16`$, $`\tau`$ per source domain). PMSA-BN's gain over the best baseline is positive in every seed (mean seed standard deviation 0.04 points).
 
 ### 5.1 Main results (ResNet-34 U-Net)
 
@@ -754,6 +754,52 @@ Dice varies by at most 0.008 over the whole grid.
 | AdaBN | 1 | 0 | 16.1 ms | 15.8 ms |
 | **PMSA-BN** | 2 | 0 | **25.1 ms** | **24.6 ms** |
 | TENT (10 steps) | 10 | 10 | 284.0 ms | 400.8 ms |
+
+### Hyperparameters: values and justification
+
+Every PMSA-BN hyperparameter was fixed **without target data**. The pseudo-mask thresholds, pseudo-counts and constants are the same for all 17 transfers; only the temperature τ is set per source domain, using source data only.
+
+| Hyperparameter | Value | How it was set | Main reason |
+| :-- | :-: | :-- | :-- |
+| $`\theta_{hi}`$ (confident foreground) | 0.90 | fixed a priori | precision over recall; missed pixels are covered by shrinkage, wrong pixels are not |
+| $`\theta_{lo}`$ (confident background) | 0.10 | fixed a priori | same confidence level as $`\theta_{hi}`$ for the background |
+| $`\kappa_\mu`$, $`\kappa_\sigma`$ (pseudo-counts) | 8, 16 | fixed a priori | see [Why κ_μ = 8 and κ_σ = 16](#why-kappa_mu8-and-kappa_sigma16) |
+| $`\tau`$ (mixing temperature) | 0.5 / 1 / 2 / 10 | per source domain, on perturbed source validation data | most adaptive value that leaves clean source data unchanged |
+| $`\epsilon`$ (in $`D_c`$) | $`10^{-5}`$ | equal to the BN layer's own $`\epsilon`$ | avoids division by zero at the same variance floor BN uses |
+| Forward passes | 2 | fixed a priori | better pseudo-masks can gain at most 0.006 Dice |
+| Pass-1 statistics | running statistics | fixed a priori | AdaBN statistics in pass 1 lose 0.007 Dice |
+| Phase-0 images | up to 400 | fixed a priori | standard error of the class mean ≈ 0.07σ even for a tiny cup |
+
+**Pseudo-mask thresholds, $`\theta_{hi}=0.90`$ and $`\theta_{lo}=0.10`$.**
+
+- *The two kinds of mask error do not cost the same.* A pixel left out of a mask only lowers $`N_k`$. Shrinkage then pulls the class toward its source statistics (Section 3.3), so the cost is some lost adaptation, never a wrong value. A pixel put in the **wrong** mask is worse: it shifts the class mean by $`\rho\,(\mu_j-\mu_k)`$, where $`\rho`$ is the fraction of wrong pixels and $`\mu_j`$ the mean of the class they really belong to. Shrinkage cannot detect this. Because a wrong pixel costs more than a missing one, the thresholds favour precision over recall.
+- *What 0.90 means.* For a calibrated model, a pixel with $`P_k>0.9`$ belongs to class $`k`$ with probability above 0.9, so at most about 10 % of a mask is wrong, and the bias of a class mean is at most about $`0.1\,|\mu_j-\mu_k|`$. Segmentation networks are often over-confident, so the real error rate can be higher. This is why the thresholds sit at the confident end rather than at 0.5.
+- *Why not stricter.* Raising $`\theta_{hi}`$ removes the pixels of small structures first. Their $`N_k`$ then falls, shrinkage takes over, and the layer adapts less.
+- *Why $`\theta_{lo}=1-\theta_{hi}`$.* With two classes, $`P_{fg}<0.1`$ is the same as $`P_{bg}>0.9`$, so background and foreground are kept at the same confidence level. With $`K>2`$ classes, every foreground probability must be below 0.1, so a background pixel has $`P_{bg}>1-0.1\,(K-1)`$.
+- *The excluded band removes boundary pixels.* Pixels with $`0.1\le P\le0.9`$ lie mostly on object borders. Their receptive fields mix two classes, so including them would blur the two class means toward each other and inflate the class variances.
+- *Nested structures.* Near the cup border the rim probability alone is often below 0.9 even inside the disc, so the disc mask uses $`P_{rim}+P_{cup}>\theta_{hi}`$. The cup mask is restricted to the disc, which also rules out anatomically impossible cup pixels outside it.
+- *Evidence.* Dice changes by less than 0.004 for $`\theta_{hi}\in[0.80,0.95]`$, and by at most 0.008 over the full 27-setting grid. Replacing the pseudo-masks by ground-truth masks gains only 0.006. Mask quality is therefore not the bottleneck, and the exact threshold is not critical.
+
+**Temperature τ.**
+
+- *What it controls.* For small shifts $`\alpha_c\approx D_c/\tau`$ ([D11](#d11-properties-of-the-mixing-weight-eqs-68)), and $`\alpha_c=1-e^{-1}\approx0.63`$ exactly at $`D_c=\tau`$. So τ is the shift size at which a channel is mostly adapted.
+- *Why it cannot be zero.* Even without any domain shift, $`D_c`$ is not exactly zero, because the class statistics of one image are estimated from finitely many positions. τ must be large enough that this estimation noise does not trigger adaptation.
+- *How it was chosen* (source data only). Candidates $`\{0.1,0.3,0.5,1,2,3,10\}`$ were evaluated on colour/intensity-perturbed copies of the source validation set, which imitate an appearance shift, and on the clean validation set. The chosen τ is the most adaptive (smallest) value whose clean validation Dice stays within 0.003 of the source model. In words: adapt as much as possible, but never change the model when nothing has shifted.
+- *Resulting values.* 0.5 for REFUGE, ORIGA, Montgomery and Shenzhen; 1 for Kvasir and CVC-ClinicDB; 2 for ISIC 2018; 10 for PH². PH² has only 40 validation images; a likely reason for its larger τ is that its clean-data $`D_c`$ is noisier, so the safety condition is met only at a larger τ.
+- *Why per domain and not per target.* The noise level of $`D_c`$ depends on the source model and image type, which are known at the source site. Choosing τ per target would need target labels.
+- *Evidence.* On held-out source images, PMSA-BN changes Dice by less than 0.002, with mean $`\alpha_c\approx0.01`$.
+
+**Numerical constant ε = 10⁻⁵.** This is PyTorch's default BN ε. Using the same value in the denominator of $`D_c`$ means that $`D_c`$ treats a channel as constant at exactly the variance floor at which the BN layer itself does. Its only role is to prevent division by zero.
+
+**Two forward passes.** A third pass could re-estimate the pseudo-masks from the adapted prediction. This cannot help much: even perfect masks (ground truth) improve Dice by only 0.006, while each extra pass costs about 12 ms. Two passes are therefore the cheapest setting that keeps nearly all of the benefit.
+
+**Pass 1 uses the running statistics.** At $`B=1`$ AdaBN statistics give worse pseudo-masks (Section 1.1), and starting from them lowers the final Dice by 0.007. The running statistics are also the safe default: if the image is not shifted, pass 1 is exactly the source model.
+
+**Up to 400 Phase-0 images.** The source class statistics average over all images, so their standard error falls as $`1/\sqrt{n}`$. With 400 images even a tiny cup has about 230 bottleneck positions in total, giving a standard error of about $`0.07\,\sigma`$ (Justification 3 in Section 3.1). More images would reduce this only slowly, while Phase 0 runs once.
+
+**Baseline settings.** TENT uses 10 Adam steps with learning rate $`10^{-4}`$ on the BN affine parameters and is reset after every image. This gives it a compute budget about 11 times that of PMSA-BN. α-BN uses the midpoint $`\alpha=0.5`$; because the oracle row reports the best α per target, chosen with target labels, the comparison does not depend on this choice.
+
+**Training settings** (input size, learning rate, epochs and loss per modality; see the paper). These define the source model, which **all** methods share, so they affect every column of the results tables equally and do not favour PMSA-BN. They are standard choices, with early stopping on the source validation Dice.
 
 ---
 
